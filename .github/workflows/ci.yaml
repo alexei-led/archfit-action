@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: action.yml is valid YAML
+        run: python3 -c "import yaml,sys; yaml.safe_load(open('action.yml'))"
+
+  smoke:
+    name: Smoke — envelope from a real state document
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch a published state document to report
+        run: |
+          # The archfit repo commits real architecture-state documents as test
+          # baselines. Using one keeps this smoke test honest: the action is
+          # exercised against a document archfit actually emitted, not a stub
+          # written to match the action's expectations.
+          curl -fsSL -o archfit-state.json \
+            https://raw.githubusercontent.com/alexei-led/archfit/main/internal/extract/golang/testdata/single-module/baseline.json
+          jq -r '.schema_version, .verdict' archfit-state.json
+      - uses: ./
+        id: report
+        with:
+          state-file: archfit-state.json
+      - name: The envelope names what was analysed
+        run: |
+          jq . archfit-envelope.json
+          test "$(jq -r '.schema_version' archfit-envelope.json)" = "archfit.report-envelope.v1"
+          test -n "$(jq -r '.report.digest' archfit-envelope.json)"
+          test "$(jq -r '.report.verdict' archfit-envelope.json)" = "${{ steps.report.outputs.verdict }}"
+      - name: A document from another contract is refused
+        run: |
+          echo '{"schema_version":"something.else.v9"}' > wrong.json
+          if ${GITHUB_WORKSPACE}/scripts/report.sh; then
+            echo "expected a refusal" >&2; exit 1
+          fi
+        env:
+          ARCHFIT_STATE_FILE: wrong.json
+        continue-on-error: false
