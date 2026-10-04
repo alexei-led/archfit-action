@@ -313,13 +313,14 @@ baseline)
 	payload=$out/.archfit-baseline.json
 	cp "$captured" "$payload"
 	# The capture is only useful when this image finds it comparable. The self-check
-	# reads the copy, mounted read-only like every other input.
+	# reads the copy, mounted read-only like every other input. It is not materialized,
+	# so the envelope's baseline_digest stays empty: the capture read no stored baseline.
 	cp "$payload" "$inputs/.archfit-baseline.json"
 	check "$out/archfit-state.json"
 	status=$(jq -r '.gate_reference.status // ""' "$out/archfit-state.json")
 	[[ $status == comparable ]] ||
 		die "the captured baseline is not comparable in this image ($status): $(jq -r '(.gate_reference.reasons // []) | join("; ")' "$out/archfit-state.json")"
-	artifact=archfit-baseline
+	kind=baseline artifact=archfit-baseline
 	;;
 esac
 

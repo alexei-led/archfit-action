@@ -1,4 +1,4 @@
 repository: github.com/alexei-led/archfit-app
-revision: 9dca5f9d6b21f1f920bc3571bb86a025e54c4242
+revision: c0b1e977e3ba865e1ab484f275a29c2dd6a991dc
 path: internal/wire/envelope/envelope.v1.schema.json
-sha256: 2fd13babef253db753c0c174c80ca4db39f550c0ff232b3b52dfe6bc2ce39714
+sha256: a8008d3f49746a9b2047efe29d959ae51ecae5113b911f68cf2a3ecdf7c5110f

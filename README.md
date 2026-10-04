@@ -46,8 +46,8 @@ jobs:
 Do not add a checkout step: the action does its own, without persisted
 credentials.
 
-Without `endpoint` the action analyzes only: nothing is sent, the report is a
-workflow artifact, and a `blocked` verdict fails the job. No App checks that a
+Without `endpoint` the action analyzes only: nothing is sent, the report or the
+captured baseline is a workflow artifact, and a `blocked` verdict fails the job. No App checks that a
 policy owner approved a pull request's change to the policy, baseline or labels,
 so a pull request is measured against the base branch's files only. Its own
 edits to them have no effect, and a pull request that deletes `.archfit.yaml`
@@ -68,16 +68,24 @@ the App accepts none of these events.
 | --- | --- | --- | --- |
 | `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src` | state report | `<endpoint>/v1/reports` |
 | `discovery` (`discover: true`) | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
-| `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | nothing yet: artifact only |
+| `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
 
 Discovery and baseline run on the default branch only. Reports come from
 `pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode is
 refused before any work, because the App accepts a dispatched run only as
-discovery. Baseline mode fails unless the engine finds the captured baseline
-comparable in the same image. Commit the `archfit-baseline` artifact as
-`.archfit-baseline.json` in a pull request that a policy owner approves. A
-baseline captured on a laptop is not comparable: the measurement profile records
-the platform and the tool versions.
+discovery or baseline. Baseline mode fails unless the engine finds the captured
+baseline comparable in the same image. A baseline captured on a laptop is not
+comparable: the measurement profile records the platform and the tool versions.
+
+With `endpoint`, baseline mode sends the captured file to the App, which opens
+or updates a draft pull request from `archfit/baseline` that changes only
+`.archfit-baseline.json`. The App never commits a baseline to the default
+branch: it changes only when an architecture owner approves that pull request's
+exact head commit and it is merged. Dispatch the capture on the current
+default-branch head; the App refuses a capture of an older head. See
+[Baseline answers](#baseline-answers). Without `endpoint`, commit the
+`archfit-baseline` artifact as `.archfit-baseline.json` in a pull request that a
+policy owner approves.
 
 Each mode uploads its payload as a workflow artifact: `archfit-report` (the name
 the App's graph view reads), `archfit-policy` or `archfit-baseline`.
@@ -86,7 +94,7 @@ the App's graph view reads), `archfit-policy` or `archfit-baseline`.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports` or `/v1/discoveries`. Empty means analyze only. |
+| `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries` or `/v1/baselines`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
 | `engine-version` | *(required)* | Engine release of the image, for example `v2.3.1`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
@@ -101,10 +109,12 @@ the App's graph view reads), `archfit-policy` or `archfit-baseline`.
 | `payload-file` | The report, draft policy or baseline the engine produced. |
 | `envelope-file` | The envelope, exactly as sent in the `X-Archfit-Envelope` header. |
 | `app-status` | HTTP status of the App's final answer; `000` when no answer arrived; empty when nothing was sent. |
-| `app-answer` | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`. |
+| `app-answer` | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`, `{"pull_request":12,"url":"…"}`, `{"unchanged":true}` or `{"error":"<code>"}`. |
 
-The job status covers the run and the upload. On an accepted upload the App's
-checks carry the verdict.
+The job status covers the run and the upload. On an accepted report the App's
+checks carry the verdict. The step summary repeats the App's answer: the
+conclusion and reason, the pull request number and URL, `unchanged`, or the
+HTTP status and error code.
 
 ## Trusted inputs
 
@@ -132,8 +142,9 @@ mounts it read-only:
 The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 16 flat
 typed keys. [`schema/`](schema/) holds the vendored copy, and
 [`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
-sha256. CI validates the envelopes the action builds for `pull_request`, `push`
-and `workflow_dispatch` discovery events against it. Checking that the vendored
+sha256. CI validates the envelopes the action builds for `pull_request` and
+`push` reports, `workflow_dispatch` discovery, and `workflow_dispatch` and
+`push` baselines against it. Checking that the vendored
 bytes still equal the App's schema belongs in the App's CI.
 
 The envelope states what was analysed: repository, event, pull request, head,
@@ -152,18 +163,39 @@ customer-attested.
 One `POST` per attempt: `Authorization: Bearer <OIDC token>`, the envelope in
 `X-Archfit-Envelope`, the exact payload bytes as the body.
 
-- Pre-checks: report at most 5 MiB, draft policy at most 1 MiB, envelope at most
-  8192 bytes on one line.
+- Pre-checks: report at most 5 MiB, draft policy and baseline at most 1 MiB
+  (1,048,576 bytes), envelope at most 8192 bytes on one line.
 - Retries: on 429, 5xx and no answer, up to 5 attempts within 300 s. The wait
   is `Retry-After` in seconds (at most four digits, capped at 120 s). Any other
   value, an HTTP date included, falls back to 5 s doubling with ±20% jitter.
   Each attempt mints a fresh OIDC token.
-- 409 means a newer commit or run attempt supersedes the upload: a notice, not a
-  failure. Every other answer is final; the error names the App's code and the fix.
+- 409 on a report or a draft policy means a newer commit or run attempt
+  supersedes the upload: a notice, not a failure. 409 on a baseline fails the
+  job (see below). Every other answer is final; the error names the App's code
+  and the fix.
 - The App's answer reaches the log and the step summary only when each field has
-  its documented shape: a lowercase code, a number or a GitHub URL. Anything else
-  prints as `(unexpected value)`, so the answer cannot inject workflow commands
-  or markdown.
+  its documented shape: a lowercase code, a number, the JSON literal `true` or a
+  GitHub URL. Anything else prints as `(unexpected value)`, so the answer cannot
+  inject workflow commands or markdown.
+
+### Baseline answers
+
+The baseline upload is `POST <endpoint>/v1/baselines` with
+`Content-Type: application/json` and the exact bytes of the captured
+`.archfit-baseline.json` as the body. Its envelope has `kind: baseline`,
+`pull_request: 0`, empty `base_sha` and `merge_base_sha`, the checked-out
+default-branch commit as `head_sha`, an empty `baseline_digest` (the capture
+reads no stored baseline), and the digest of the labels file the capture read
+as `labels_digest` (empty without one). The captured file stays a workflow
+artifact too.
+
+| Answer | Job | Meaning |
+| --- | --- | --- |
+| 200 `{"pull_request": n, "url": "…"}` | passes | The App opened or updated the baseline pull request. An architecture owner approves its exact head commit and merges it. |
+| 200 `{"unchanged": true}` | passes | The capture equals the baseline on the default branch. Nothing was written. |
+| 409 `stale_head`, `stale_attempt` | fails | The default branch moved on, or a newer run attempt exists. No pull request was opened: dispatch the capture again. |
+| 400, 401, 403, 413 | fails | Final. The error names the code and the fix, for example `policy_mismatch` or `labels_mismatch` (dispatch again on the current head), `unknown_engine_identity` (pin the manifest's image) or `baseline_too_large`. |
+| 429, 5xx, no answer | retried | As for every upload. |
 
 ## Edge cases
 

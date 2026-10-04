@@ -64,7 +64,7 @@ The design plan lives in `archfit-app` under `docs/plans/`.
 - **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
   every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
   in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the
-  App's `eligible()` table).
+  App's `eligible()` table); dispatch runs discovery or baseline.
 - **The endpoint is https and exact.** No trailing slash (it is also the OIDC audience);
   plain http only for 127.0.0.1/localhost. App answer fields are printed only when they
   match their documented shape.
@@ -72,8 +72,20 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   file; a reusable workflow would change that binding.
 - **Nested actions are pinned by full commit SHA**, with the tag in a comment. The App
   pins this action by commit; a tag inside it would make that commit's behaviour mutable.
-- **Retries only on 429, 5xx and no answer.** 409 is superseded (exit 0); every other
-  answer is final. `Retry-After` counts only as 1-4 decimal digits; else backoff.
+- **Retries only on 429, 5xx and no answer.** 409 on a report or draft is superseded
+  (exit 0): the newer run uploads its own. 409 on a baseline (`stale_head`,
+  `stale_attempt`) fails the job with "dispatch the capture again": nothing re-proposes
+  it. Every other answer is final. `Retry-After` counts only as 1-4 decimal digits;
+  else backoff.
+- **A baseline is proposed, never committed.** With an endpoint, baseline mode posts the
+  captured `.archfit-baseline.json` bytes (at most 1 MiB, `application/json`) to
+  `/v1/baselines`, and the App opens or updates an owner-reviewed pull request; it
+  answers `{pull_request,url}` or `{unchanged:true}`. Envelope: `kind: baseline`,
+  `pull_request` 0, empty `base_sha`/`merge_base_sha`, `head_sha` = the checked-out
+  default-branch commit, `baseline_digest` "" (the capture reads no stored baseline, so
+  the self-check copy is never materialized into `inputs.tsv`), `labels_digest` = the
+  labels blob the capture read, or "". Without an endpoint the capture is an artifact
+  only and no envelope is written. `unchanged` counts only as the JSON literal `true`.
 - **Fork pull requests cannot hold `id-token: write`.** They are analysed and kept as
   an artifact, never uploaded. Do not add a fallback that makes them look enforceable.
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.

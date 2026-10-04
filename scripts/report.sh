@@ -15,9 +15,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require jq curl
 
 # App limits: the upload body cap (wire/report MaxBytes), the discovery draft cap
-# (control/onboarding), and the raw envelope cap (wire/envelope).
+# (control/onboarding), the baseline file cap (wire/policy MaxBaselineBytes), and the
+# raw envelope cap (wire/envelope).
 readonly REPORT_MAX_BYTES=5242880
 readonly DISCOVERY_MAX_BYTES=1048576
+readonly BASELINE_MAX_BYTES=1048576
 readonly ENVELOPE_MAX_BYTES=8192
 # Retries happen only when the App asks for one (429), failed (5xx), or did not answer.
 readonly MAX_ATTEMPTS=5
@@ -36,7 +38,8 @@ verdict=$(fact verdict)
 payload=$(fact payload_file)
 fork=$(fact fork)
 
-if [[ $mode == baseline ]]; then
+# Without an App the capture stays an artifact: nobody would open its pull request.
+if [[ $mode == baseline && -z $endpoint ]]; then
 	notice "baseline captured and comparable in this image. Commit the archfit-baseline artifact as .archfit-baseline.json in a pull request that a policy owner approves."
 	summary "Baseline: the \`archfit-baseline\` artifact holds \`.archfit-baseline.json\`. Commit it in a pull request that a policy owner approves."
 	exit 0
@@ -86,6 +89,7 @@ fi
 case $kind in
 report) route=/v1/reports content_type=application/json cap=$REPORT_MAX_BYTES ;;
 discovery) route=/v1/discoveries content_type=application/yaml cap=$DISCOVERY_MAX_BYTES ;;
+baseline) route=/v1/baselines content_type=application/json cap=$BASELINE_MAX_BYTES ;;
 *) die "unknown upload kind '$kind'" ;;
 esac
 size=$(wc -c <"$payload" | tr -d ' ')
@@ -189,13 +193,23 @@ hint() {
 	repository_mismatch) echo "The OIDC token and the envelope name different repositories." ;;
 	not_installed) echo "Install the archfit GitHub App on this repository." ;;
 	run_not_found | run_mismatch | digest_mismatch) echo "Run the workflow again." ;;
-	payload_too_large | discovery_too_large) echo "The payload exceeds the App's size limit." ;;
+	payload_too_large | discovery_too_large | baseline_too_large) echo "The payload exceeds the App's size limit." ;;
 	settings_missing) echo "Merge the onboarding pull request that adds .archfit-app.yaml first." ;;
-	workflow_not_approved) echo "Run discovery from the workflow that .archfit-app.yaml names." ;;
+	workflow_not_approved) echo "Run $kind from the workflow that .archfit-app.yaml names." ;;
 	not_default_branch | unsupported_event | envelope_mismatch | fork)
-		echo "Run discovery by workflow_dispatch on the default branch of this repository."
+		if [[ $kind == report ]]; then
+			echo "Reports come from pull_request and push runs of this repository."
+		else
+			echo "Run $kind by workflow_dispatch on the default branch of this repository."
+		fi
 		;;
 	discovery_invalid) echo "The App refused the engine's draft policy." ;;
+	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v2 baseline." ;;
+	unknown_engine_identity) echo "Pin the engine-version and image-digest the App's manifest lists for this runner, as the generated workflow does." ;;
+	policy_missing) echo "The default branch has no .archfit.yaml; merge a policy before capturing a baseline." ;;
+	policy_mismatch | labels_mismatch)
+		echo "The capture did not read the .archfit.yaml and .archfit-labels.yaml at the default-branch head; dispatch the baseline capture again."
+		;;
 	rate_limited | unavailable | oidc_unavailable | internal) echo "The App is unavailable; run the workflow again later." ;;
 	method_not_allowed) echo "A proxy changed the request method; endpoint must be the App base URL, reached directly." ;;
 	*)
@@ -207,24 +221,53 @@ hint() {
 	esac
 }
 
+# proposal prints the pull request the App opened or updated, shape-checked.
+proposal() {
+	printf 'pull request #%s %s' "$(app_value .pull_request '^[1-9][0-9]{0,9}$')" \
+		"$(app_value .url '^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$')"
+}
+
 case $status in
 2??)
-	if [[ $kind == report ]]; then
+	case $kind in
+	report)
 		result="conclusion $(app_value .conclusion "$APP_TOKEN"), reason $(app_value .reason "$APP_TOKEN")"
-	else
-		result="policy pull request #$(app_value .pull_request '^[1-9][0-9]{0,9}$') $(app_value .url '^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$')"
-	fi
+		next="The App's checks carry the verdict; this job's status covers only the upload."
+		;;
+	discovery)
+		result="policy $(proposal)"
+		next="Review and merge it to adopt the policy."
+		;;
+	baseline)
+		# Only the JSON literal true; anything else is read as a proposal and shape-checked.
+		if [[ -n $answer_json ]] && jq -e '.unchanged == true' <<<"$answer_json" >/dev/null; then
+			result="unchanged: the capture equals the baseline on the default branch"
+			next="Nothing was written."
+		else
+			result="baseline $(proposal)"
+			next="The baseline changes only when an architecture owner approves that pull request's exact head commit and it is merged."
+		fi
+		;;
+	esac
 	printf 'archfit: the App accepted the %s: %s\n' "$kind" "$(escape "$result")"
-	summary "- App: accepted the $kind ($status): $result. The App's checks carry the verdict; this job's status covers only the upload."
+	summary "- App: accepted the $kind ($status): $result. $next"
 	;;
 409)
+	# A superseded report or draft is replaced by the newer run's own upload. A superseded
+	# baseline is not: nothing proposes it until someone dispatches the capture again.
+	if [[ $kind == baseline ]]; then
+		summary "- App: refused the baseline (409${code:+ $code}): no pull request was opened. Dispatch the baseline capture again."
+		die "the App answered 409 ${code:-conflict}: the default branch moved on or a newer run attempt exists, so no baseline pull request was opened. Dispatch the baseline capture again on the current default-branch head."
+	fi
 	notice "the App answered 409 ${code:-conflict}: a newer commit or run attempt supersedes this upload, and nothing was published for it"
 	;;
 000)
+	summary "- App: no answer for the $kind upload after $attempt attempt(s)."
 	[[ $token_failed == false ]] || die "could not obtain an OIDC token for audience $audience after $attempt attempts"
 	die "no answer from $url after $attempt attempts"
 	;;
 *)
+	summary "- App: refused the $kind upload: HTTP $status${code:+ $code} after $attempt attempt(s)."
 	die "the App did not accept the $kind upload: HTTP $status${code:+ $code} after $attempt attempt(s). $(hint)"
 	;;
 esac

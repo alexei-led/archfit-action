@@ -88,6 +88,7 @@ git -C "$cross" checkout --quiet y
 merge "$(git -C "$cross" rev-parse x~1)"
 y2=$(git -C "$cross" rev-parse HEAD)
 git -C "$cross" checkout --quiet main
+cm=$(git -C "$cross" rev-parse main) # a default-branch head with a policy and no labels file
 
 no_policy=$tmp/no-policy
 git init --quiet -b main "$no_policy"
@@ -107,7 +108,7 @@ begin() { # NAME
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -142,6 +143,16 @@ json_ok() { jq -e "$1" "${@:3}" <<<"$2" >/dev/null; } # FILTER JSON [JQ ARGS]
 valid_envelope() { "$validator" "$schema" "$1=$2" >"$case_dir/validator.out" 2>&1; }
 sha_of() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
 ok_answer='{"status": 200, "body": {"conclusion": "success", "reason": "healthy"}}'
+proposed_answer='{"status": 200, "body": {"pull_request": 12, "url": "https://github.com/acme/shop/pull/12"}}'
+summary_has() { grep -qF -- "$1" "$GITHUB_STEP_SUMMARY"; }
+sized_baseline() { # BYTES: print the path of a baseline file of exactly BYTES bytes
+	local prefix='{"schema_version":"archfit.baseline.v2","accepted":[]}'
+	{
+		printf '%s' "$prefix"
+		head -c $(($1 - ${#prefix})) /dev/zero | tr '\0' ' '
+	} >"$case_dir/baseline-$1.json"
+	printf '%s' "$case_dir/baseline-$1.json"
+}
 
 # --- Contract provenance -----------------------------------------------------------
 
@@ -243,6 +254,65 @@ expect_eq "the body is the engine's draft" "$(sha_of "$draft")" "$(upload_field 
 expect_eq "app-answer" '{"pull_request":7,"url":"https://github.com/acme/shop/pull/7"}' "$(out app-answer)"
 expect_eq "artifact name" archfit-policy "$(out artifact-name)"
 
+begin "workflow_dispatch baseline: captured, self-checked, proposed through /v1/baselines"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app "[$proposed_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+envelope=$(out envelope-file) payload=$(out payload-file)
+expect "the envelope conforms to the App schema" valid_envelope "$envelope" "$payload"
+cp "$envelope" "$tmp/baseline.envelope"
+expect_eq "kind" baseline "$(envelope_field kind)"
+expect_eq "event" workflow_dispatch "$(envelope_field event)"
+expect_eq "pull_request, base and merge base are empty" "0||" \
+	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
+expect_eq "head_sha is the default-branch head the run checked out" "$c2" "$(envelope_field head_sha)"
+expect_eq "no baseline digest: the capture reads no stored baseline" "" "$(envelope_field baseline_digest)"
+expect_eq "labels digest is the default-branch labels blob" \
+	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
+expect_eq "labels digest is the digest of the bytes the capture read" \
+	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
+expect_eq "engine identity" "v2.3.1 $ENGINE_DIGEST linux/amd64" \
+	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
+	'.args == ["baseline", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
+	 and (.bundle | keys) == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
+expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
+expect_eq "one upload" 1 "$(requests upload)"
+expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
+expect_eq "the header carries the envelope file byte for byte" "$(<"$envelope")" "$(upload_field 0 .envelope)"
+expect_eq "the body is the captured file" "$(sha_of "$payload")" "$(upload_field 0 .body_sha256)"
+expect_eq "the payload digest names the body" \
+	"$(envelope_field payload_digest)" "sha256:$(upload_field 0 .body_sha256)"
+expect_eq "content type" application/json "$(upload_field 0 .content_type)"
+expect_eq "authorization is the minted OIDC token" "Bearer oidc-1" "$(upload_field 0 .authorization)"
+expect_eq "the token audience is the endpoint, URL-encoded" \
+	"api-version=2.0&audience=$(jq -rn --arg a "$ARCHFIT_ENDPOINT" '$a | @uri')" "$(token_query)"
+expect_eq "app-status" 200 "$(out app-status)"
+expect_eq "app-answer" '{"pull_request":12,"url":"https://github.com/acme/shop/pull/12"}' "$(out app-answer)"
+expect_eq "the capture is still kept as an artifact" archfit-baseline "$(out artifact-name)"
+expect "the log names the pull request" log_has "baseline pull request #12 https://github.com/acme/shop/pull/12"
+expect "the step summary names the pull request" summary_has "baseline pull request #12 https://github.com/acme/shop/pull/12"
+expect "the step summary says an owner approves it" summary_has "architecture owner approves"
+
+begin "push baseline without a labels file: both input digests empty"
+on_push "$cm"
+export ARCHFIT_MODE=baseline
+start_app "[$proposed_answer]"
+run_action "$cross"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "kind" baseline "$(envelope_field kind)"
+expect_eq "event" push "$(envelope_field event)"
+expect_eq "head_sha is the pushed default-branch commit" "$cm" "$(envelope_field head_sha)"
+expect_eq "pull_request, base and merge base are empty" "0||" \
+	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
+expect_eq "baseline and labels digests are empty" "|" \
+	"$(envelope_field baseline_digest)|$(envelope_field labels_digest)"
+expect "the capture read no labels" json_ok '.bundle | keys == [".archfit.yaml"]' "$(engine_call baseline)"
+expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
+
 # --- Events the App does not accept: refused before the checkout ----------------------
 
 for refused in workflow_run pull_request_target merge_group; do
@@ -296,11 +366,12 @@ expect_eq "no engine run" 0 "$(engine_calls)"
 begin "the validator rejects envelopes the App's decoder or the header transport would reject"
 reference=$tmp/pull_request.envelope
 expect "the reference envelope is valid" valid_envelope "$reference" ""
+expect "the baseline reference envelope is valid" valid_envelope "$tmp/baseline.envelope" ""
 rejects() { # NAME: $case_dir/NAME.json must fail validation
 	if "$validator" "$schema" "$case_dir/$1.json" >/dev/null 2>&1; then fail "rejects $1"; else pass "rejects $1"; fi
 }
-mutate() { # NAME JQ-FILTER
-	jq -cj "$2" "$reference" >"$case_dir/$1.json"
+mutate() { # NAME JQ-FILTER [REFERENCE]
+	jq -cj "$2" "${3:-$reference}" >"$case_dir/$1.json"
 	rejects "$1"
 }
 edit() { # NAME FROM TO: textual mutations jq cannot express
@@ -312,7 +383,7 @@ edit() { # NAME FROM TO: textual mutations jq cannot express
 mutate extra-key '. + {workflow_ref: "acme/shop/.github/workflows/archfit.yaml@refs/heads/main"}'
 mutate missing-key 'del(.labels_digest)'
 mutate null-kind '.kind = null'
-mutate unknown-kind '.kind = "baseline"'
+mutate unknown-kind '.kind = "snapshot"'
 mutate other-schema-version '.schema_version = "archfit.report-envelope.v2"'
 mutate string-run-id '.run_id |= tostring'
 mutate zero-attempt '.run_attempt = 0'
@@ -323,6 +394,10 @@ mutate platform-without-arch '.platform = "linux"'
 mutate push-with-pull-request '.event = "push" | .base_sha = "" | .merge_base_sha = ""'
 mutate pull-request-without-merge-base '.merge_base_sha = ""'
 mutate discovery-with-baseline '.kind = "discovery" | .baseline_digest = ("5b" * 32) | .labels_digest = ""'
+mutate baseline-with-baseline-digest '.baseline_digest = ("5b" * 32)' "$tmp/baseline.envelope"
+mutate baseline-with-pull-request '.pull_request = 42' "$tmp/baseline.envelope"
+mutate baseline-with-base-sha ".base_sha = \"$c1\"" "$tmp/baseline.envelope"
+mutate baseline-with-prefixed-labels-digest '.labels_digest = "sha256:" + .labels_digest' "$tmp/baseline.envelope"
 edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
 edit fraction-attempt '"run_attempt":1,' '"run_attempt":1.0,'
 edit duplicate-key '"labels_digest"' "\"head_sha\":\"$f1\",\"labels_digest\""
@@ -410,6 +485,14 @@ expect_eq "one upload" 1 "$(requests upload)"
 expect "the error names the App's code" log_has "HTTP 400 envelope_invalid"
 expect "the error gives the recovery" log_has "action commit the App pins"
 expect_eq "app-answer" '{"error":"envelope_invalid"}' "$(out app-answer)"
+
+begin "report 400 unsupported_event: the hint names the report events, not dispatch"
+on_push "$c2"
+start_app '[{"status": 400, "body": {"error": "unsupported_event"}}]'
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the hint names the report events" log_has "Reports come from pull_request and push runs"
+expect "the hint does not send a report to workflow_dispatch" bash -c '! grep -q "by workflow_dispatch" "$1"' _ "$case_dir/log"
 
 begin "404: final, endpoint hint"
 on_push "$c2"
@@ -648,10 +731,9 @@ expect_eq "the run succeeds" 0 "$action_rc"
 
 # --- Baseline capture -----------------------------------------------------------------
 
-begin "baseline: captured in the image, self-checked, kept as an artifact"
+begin "baseline without an endpoint: captured, self-checked, kept as an artifact only"
 on_push "$c2"
 export ARCHFIT_MODE=baseline
-start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
@@ -660,8 +742,116 @@ expect "capture runs with the protected policy and labels, never a stored baseli
 expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
 expect_eq "the payload is the captured file" .archfit-baseline.json "$(basename "$(out payload-file)")"
 expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
-expect_eq "no envelope: the App has no baseline upload yet" "" "$(out envelope-file)"
-expect_eq "nothing sent" 0 "$(requests upload)"
+expect_eq "no envelope: nothing is sent without an App" "" "$(out envelope-file)"
+expect_eq "no app-status" "" "$(out app-status)"
+expect "the notice says to commit the artifact" log_has "Commit the archfit-baseline artifact"
+
+begin "baseline equal to the protected one: unchanged, nothing written"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app '[{"status": 200, "body": {"unchanged": true}}]'
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "one upload" 1 "$(requests upload)"
+expect_eq "app-status" 200 "$(out app-status)"
+expect_eq "app-answer" '{"unchanged":true}' "$(out app-answer)"
+expect "the log says unchanged" log_has "unchanged: the capture equals the baseline on the default branch"
+expect "the step summary says nothing was written" summary_has "Nothing was written."
+expect "no pull request is named" bash -c '! grep -q "pull request #" "$1"' _ "$case_dir/log"
+
+for stale in stale_head stale_attempt; do
+	begin "baseline 409 $stale: not a success; dispatch the capture again"
+	on_dispatch "$c2" false
+	export ARCHFIT_MODE=baseline
+	start_app "[{\"status\": 409, \"body\": {\"error\": \"$stale\"}}]"
+	run_action "$origin"
+	expect_eq "the action fails: no baseline pull request was opened" 1 "$action_rc"
+	expect_eq "one upload, no retry" 1 "$(requests upload)"
+	expect_eq "app-status" 409 "$(out app-status)"
+	expect "the error names the code" log_has "409 $stale"
+	expect "the error says to dispatch again" log_has "Dispatch the baseline capture again"
+	expect "it is not reported as superseded" bash -c '! grep -q "supersedes this upload" "$1"' _ "$case_dir/log"
+	expect "it is not reported as accepted" bash -c '! grep -q "accepted the baseline" "$1"' _ "$case_dir/log"
+	expect "the step summary says to dispatch again" summary_has "Dispatch the baseline capture again"
+done
+
+begin "baseline 503 with Retry-After: retried with a fresh token"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app '[{"status": 503, "headers": {"Retry-After": "3"}, "body": {"error": "unavailable"}}, '"$proposed_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "two uploads" 2 "$(requests upload)"
+expect_eq "both to /v1/baselines" "/v1/baselines /v1/baselines" "$(upload_field 0 .path) $(upload_field 1 .path)"
+expect_eq "the retry carries the same envelope" "$(upload_field 0 .envelope)" "$(upload_field 1 .envelope)"
+expect_eq "the retry carries a fresh token" "Bearer oidc-2" "$(upload_field 1 .authorization)"
+expect_eq "waits Retry-After" 3 "$(<"$FAKE_SLEEP_LOG")"
+expect_eq "app-status is the final answer" 200 "$(out app-status)"
+expect "the step summary names the pull request" summary_has "baseline pull request #12"
+
+begin "baseline over the App's 1 MiB cap: refused before sending"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app "[$proposed_answer]"
+export FAKE_BASELINE
+FAKE_BASELINE=$(sized_baseline 1048577)
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "no token requested" 0 "$(requests token)"
+expect_eq "no upload" 0 "$(requests upload)"
+expect "the error names the size and the cap" log_has "the baseline payload is 1048577 bytes; the App accepts at most 1048576"
+expect_eq "the capture is still kept as an artifact" archfit-baseline "$(out artifact-name)"
+
+begin "baseline of exactly 1 MiB: sent"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app "[$proposed_answer]"
+export FAKE_BASELINE
+FAKE_BASELINE=$(sized_baseline 1048576)
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "one upload of 1048576 bytes" "1 1048576" "$(requests upload) $(upload_field 0 .body_bytes)"
+
+begin "baseline 413 baseline_too_large from the App: final"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app '[{"status": 413, "body": {"error": "baseline_too_large"}}]'
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "one upload" 1 "$(requests upload)"
+expect "the error names the App's code" log_has "HTTP 413 baseline_too_large"
+expect "the error explains the limit" log_has "exceeds the App's size limit"
+expect "the step summary names the code" summary_has "HTTP 413 baseline_too_large"
+
+for row in \
+	"403|labels_mismatch|dispatch the baseline capture again" \
+	"403|policy_mismatch|dispatch the baseline capture again" \
+	"403|unknown_engine_identity|image-digest the App's manifest lists" \
+	"403|workflow_not_approved|Run baseline from the workflow" \
+	"400|baseline_invalid|archfit.baseline.v2 baseline"; do
+	IFS='|' read -r status code says <<<"$row"
+	begin "baseline $status $code: final, with the recovery"
+	on_dispatch "$c2" false
+	export ARCHFIT_MODE=baseline
+	start_app "[{\"status\": $status, \"body\": {\"error\": \"$code\"}}]"
+	run_action "$origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect_eq "one upload" 1 "$(requests upload)"
+	expect "the error names the App's code" log_has "HTTP $status $code"
+	expect "the error gives the recovery" log_has "$says"
+	expect "the step summary names the code" summary_has "HTTP $status $code"
+done
+
+begin "baseline answers are never echoed raw: no workflow command, no markdown"
+on_dispatch "$c2" false
+export ARCHFIT_MODE=baseline
+start_app '[{"status": 200, "body": {"unchanged": "true\n::error::injected", "pull_request": "12\n::error::injected", "url": "[click](https://evil.example)"}}]'
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "no injected workflow command in the log" bash -c '! grep -q "^::error::injected" "$1"' _ "$case_dir/log"
+expect "no injected link in the step summary" bash -c '! grep -q "evil.example" "$1"' _ "$GITHUB_STEP_SUMMARY"
+expect "a string 'true' is not unchanged" bash -c '! grep -q "unchanged" "$1"' _ "$GITHUB_STEP_SUMMARY"
+expect "the log says the values were unexpected" log_has "baseline pull request #(unexpected value) (unexpected value)"
 
 begin "baseline that this image finds non-comparable: failure"
 on_push "$c2"

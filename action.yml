@@ -10,10 +10,11 @@ inputs:
   endpoint:
     description: >-
       archfit App base URL over https, without a trailing slash, for example
-      https://archfit.example. Reports go to <endpoint>/v1/reports and discovery
-      drafts to <endpoint>/v1/discoveries. Empty means analyze only: nothing is sent,
-      pull requests are measured against the base branch's policy, baseline and
-      labels, and a blocked verdict fails the job.
+      https://archfit.example. Reports go to <endpoint>/v1/reports, discovery
+      drafts to <endpoint>/v1/discoveries and captured baselines to
+      <endpoint>/v1/baselines. Empty means analyze only: nothing is sent, pull
+      requests are measured against the base branch's policy, baseline and labels,
+      a blocked verdict fails the job, and a captured baseline is an artifact only.
     required: false
     default: ""
   audience:
@@ -33,7 +34,8 @@ inputs:
   mode:
     description: >-
       report (measure and upload the state), discovery (propose a first policy) or
-      baseline (capture accepted debt as an artifact). Empty means report, or
+      baseline (capture accepted debt; with an endpoint the App proposes it in a pull
+      request, else it is an artifact only). Empty means report, or
       discovery when `discover` is true. Discovery and baseline run on the default branch only.
     required: false
     default: ""
@@ -56,7 +58,10 @@ outputs:
     description: HTTP status of the App's final answer, "000" when no answer arrived; empty when nothing was sent.
     value: ${{ steps.report.outputs.app-status }}
   app-answer:
-    description: The App's JSON answer on one line, for example {"conclusion":"success","reason":"healthy"}.
+    description: >-
+      The App's JSON answer on one line, for example {"conclusion":"success","reason":"healthy"}
+      for a report, {"pull_request":12,"url":"https://github.com/o/r/pull/12"} or
+      {"unchanged":true} for a baseline, and {"error":"<code>"} for a refusal.
     value: ${{ steps.report.outputs.app-answer }}
 
 runs:

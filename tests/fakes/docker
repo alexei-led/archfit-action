@@ -12,6 +12,7 @@
 #   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
 #                             and 3 prints no report, as the engine does
 #   FAKE_BASELINE_COMPARABLE  false keeps gate_reference non_comparable after `baseline`
+#   FAKE_BASELINE             file that `baseline` writes as the capture (default: an empty v2 baseline)
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 
@@ -103,7 +104,11 @@ config)
 	cat "${FAKE_DRAFT:?}"
 	;;
 baseline)
-	printf '{"schema_version":"archfit.baseline.v2","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
+	if [[ -n ${FAKE_BASELINE:-} ]]; then
+		cp "$FAKE_BASELINE" "$bundle/.archfit-baseline.json"
+	else
+		printf '{"schema_version":"archfit.baseline.v2","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
+	fi
 	: >"$captured"
 	echo "baseline saved: /bundle/.archfit-baseline.json"
 	;;

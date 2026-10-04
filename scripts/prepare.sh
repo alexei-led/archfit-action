@@ -53,7 +53,7 @@ case $event in
 pull_request | push | workflow_dispatch) ;;
 *) die "archfit runs on pull_request, push and workflow_dispatch events only; '$event' is refused before the checkout. Trigger the archfit workflow with one of those events." ;;
 esac
-# The App accepts a dispatched run only as discovery; a dispatched report would end as
+# The App accepts a dispatched run only as discovery or baseline; a dispatched report would end as
 # unsupported_event, so it is refused before any work.
 [[ $event != workflow_dispatch || $mode != report ]] ||
 	die "a workflow_dispatch run does not report: dispatch with discover: true to propose a policy, or set mode: baseline. Reports come from pull_request and push runs."

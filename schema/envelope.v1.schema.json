@@ -25,7 +25,7 @@
   ],
   "properties": {
     "schema_version": { "const": "archfit.report-envelope.v1" },
-    "kind": { "enum": ["report", "discovery"] },
+    "kind": { "enum": ["report", "discovery", "baseline"] },
     "repository": {
       "type": "string",
       "description": "owner/name",
@@ -107,6 +107,17 @@
         "properties": {
           "baseline_digest": { "const": "" },
           "labels_digest": { "const": "" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "baseline" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "baseline_digest": { "const": "" }
         }
       }
     }
