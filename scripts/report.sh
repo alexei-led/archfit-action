@@ -129,9 +129,13 @@ post() {
 # (capped), else exponential backoff from 5 s with ±20% jitter.
 retry_wait() {
 	local after
-	after=$(awk -F': *' 'tolower($1) == "retry-after" { v = $2; sub(/[ \t\r]+$/, "", v); if (v ~ /^[0-9]+$/) r = v }
+	# Only delta-seconds of at most four digits; an HTTP date or any other value falls
+	# back to backoff. Base 10 explicitly: "08" is not an octal error.
+	after=$(awk -F': *' 'tolower($1) == "retry-after" { v = $2; sub(/[ \t\r]+$/, "", v)
+		if (v ~ /^[0-9]+$/ && length(v) <= 4) r = v }
 		END { print r }' "$answer_headers")
 	if [[ -n $after ]]; then
+		after=$((10#$after))
 		printf '%s' $((after < RETRY_AFTER_CAP_SECONDS ? after : RETRY_AFTER_CAP_SECONDS))
 	else
 		printf '%s' $(((5 << ($1 - 1)) * (80 + RANDOM % 41) / 100))
@@ -166,7 +170,16 @@ answer_json=$(jq -ce 'select(type == "object")' "$answer" 2>/dev/null | head -n 
 set_output app-status "$status"
 set_output app-answer "$answer_json"
 answer_field() { [[ -z $answer_json ]] || jq -r "$1 // empty" <<<"$answer_json"; }
-code=$(answer_field .error)
+# app_value FILTER PATTERN prints an answer field only when it has the shape the App
+# documents; anything else could carry workflow commands or markdown into the log.
+app_value() {
+	local value
+	value=$(answer_field "$1")
+	if [[ $value =~ $2 ]]; then printf '%s' "$value"; else printf '(unexpected value)'; fi
+}
+readonly APP_TOKEN='^[a-z_]{1,64}$'
+code=$(app_value .error "$APP_TOKEN")
+[[ $code != '(unexpected value)' ]] || code=""
 
 hint() {
 	case $code in
@@ -197,11 +210,11 @@ hint() {
 case $status in
 2??)
 	if [[ $kind == report ]]; then
-		result="conclusion $(answer_field .conclusion), reason $(answer_field .reason)"
+		result="conclusion $(app_value .conclusion "$APP_TOKEN"), reason $(app_value .reason "$APP_TOKEN")"
 	else
-		result="policy pull request #$(answer_field .pull_request) $(answer_field .url)"
+		result="policy pull request #$(app_value .pull_request '^[1-9][0-9]{0,9}$') $(app_value .url '^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$')"
 	fi
-	printf 'archfit: the App accepted the %s: %s\n' "$kind" "$result"
+	printf 'archfit: the App accepted the %s: %s\n' "$kind" "$(escape "$result")"
 	summary "- App: accepted the $kind ($status): $result. The App's checks carry the verdict; this job's status covers only the upload."
 	;;
 409)

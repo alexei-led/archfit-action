@@ -61,6 +61,33 @@ git -C "$origin" checkout --quiet main
 printf 'labels: []\n# moved on main\n' >"$origin/.archfit-labels.yaml"
 commit_all "$origin" "main: labels"
 c2=$(git -C "$origin" rev-parse HEAD)
+# drop (d1) branches from c1 and deletes the policy.
+git -C "$origin" checkout --quiet -b drop "$c1"
+git -C "$origin" rm --quiet .archfit.yaml
+commit_all "$origin" "drop: delete the policy"
+d1=$(git -C "$origin" rev-parse HEAD)
+git -C "$origin" checkout --quiet main
+
+# Criss-cross: x2 and y2 each merge the other's first commit, so they have two merge bases.
+cross=$tmp/cross
+git init --quiet -b main "$cross"
+write_module "$cross"
+commit_all "$cross" "code and policy"
+merge() { git -C "$cross" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff --no-edit "$1"; }
+git -C "$cross" checkout --quiet -b x
+printf '// x\n' >>"$cross/pkg/a/a.go"
+commit_all "$cross" "x1"
+git -C "$cross" checkout --quiet -b y main
+printf '// y\n' >>"$cross/pkg/b/b.go"
+commit_all "$cross" "y1"
+y1=$(git -C "$cross" rev-parse HEAD)
+git -C "$cross" checkout --quiet x
+merge "$y1"
+x2=$(git -C "$cross" rev-parse HEAD)
+git -C "$cross" checkout --quiet y
+merge "$(git -C "$cross" rev-parse x~1)"
+y2=$(git -C "$cross" rev-parse HEAD)
+git -C "$cross" checkout --quiet main
 
 no_policy=$tmp/no-policy
 git init --quiet -b main "$no_policy"
@@ -176,6 +203,12 @@ expect "no env file" json_ok 'index("--env-file") == null' "$options"
 expect "no token or OIDC variable reaches the container" \
 	json_ok '[.options[], .args[]] | map(select(test("ACTIONS_|TOKEN"))) == []' "$check_call"
 expect ".git is mounted read-only" json_ok 'index($g) != null' "$options" --arg g "$GITHUB_WORKSPACE/.git:/src/.git:ro"
+expect "each trusted input is mounted read-only over /bundle" json_ok \
+	'[.[] | select(endswith(":ro") and contains(":/bundle/"))] == [$i + "/.archfit.yaml:/bundle/.archfit.yaml:ro",
+	  $i + "/.archfit-baseline.json:/bundle/.archfit-baseline.json:ro", $i + "/.archfit-labels.yaml:/bundle/.archfit-labels.yaml:ro"]' \
+	"$options" --arg i "$RUNNER_TEMP/archfit/inputs"
+expect "/bundle itself is a separate, empty writable directory" json_ok \
+	'index($b) != null' "$options" --arg b "$RUNNER_TEMP/archfit/bundle:/bundle"
 expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
@@ -210,18 +243,53 @@ expect_eq "the body is the engine's draft" "$(sha_of "$draft")" "$(upload_field 
 expect_eq "app-answer" '{"pull_request":7,"url":"https://github.com/acme/shop/pull/7"}' "$(out app-answer)"
 expect_eq "artifact name" archfit-policy "$(out artifact-name)"
 
-begin "workflow_run report: an honest envelope for an event the App does not support"
-on_workflow_run "$f1" "$c2"
-start_app '[{"status": 200, "body": {"conclusion": "action_required", "reason": "unsupported_event"}}]'
+# --- Events the App does not accept: refused before the checkout ----------------------
+
+for refused in workflow_run pull_request_target merge_group; do
+	begin "$refused is refused before the checkout"
+	on_unsupported "$refused" "$f1" "$c2"
+	start_app "[$ok_answer]"
+	run_action "$origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect "the error names the event" log_has "'$refused' is refused before the checkout"
+	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+	expect_eq "no engine run" 0 "$(engine_calls)"
+	expect_eq "no token requested" 0 "$(requests token)"
+done
+
+# --- Analyze-only pull requests: no owner approval, so every input from the base tip --
+
+begin "analyze-only pull request: the base policy gates the pull request"
+on_pull_request "$f1" "$c1"
+run_action "$origin"
+expect_eq "the blocked verdict fails the job" 1 "$action_rc"
+expect_eq "the policy the pull request changes comes from the base tip, not its head" \
+	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect_eq "every input is recorded as base" "base base base" "$(jq -r '[.inputs[].from] | join(" ")' "$(out facts-file)")"
+expect "the envelope is still valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+
+begin "analyze-only pull request that deletes the policy: failure"
+on_pull_request "$d1" "$c1"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says the pull request deletes the policy" log_has "this pull request deletes .archfit.yaml"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
+begin "reported pull request that deletes the policy: nothing measured, the notice names the head"
+on_pull_request "$d1" "$c1"
+start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "event" workflow_run "$(envelope_field event)"
-expect_eq "head_sha is the triggering run's head, not GITHUB_SHA" "$f1" "$(envelope_field head_sha)"
-expect_eq "no pull request fields" "0||" \
-	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
-expect_eq "trusted inputs come from the default branch, not the analysed head" \
-	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect "the notice names the commit the policy was read from" log_has "no .archfit.yaml at $d1"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "criss-cross pull request with two merge bases: refused"
+on_pull_request "$x2" "$y2"
+start_app "[$ok_answer]"
+run_action "$cross"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error explains the merge bases" log_has "more than one merge base"
+expect_eq "no engine run" 0 "$(engine_calls)"
 
 # --- The validator itself: it must reject what the App's decoder rejects --------------
 
@@ -283,6 +351,39 @@ run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "two uploads" 2 "$(requests upload)"
 expect "first wait is 5 s ± 20%" test "$(<"$FAKE_SLEEP_LOG")" -ge 4 -a "$(<"$FAKE_SLEEP_LOG")" -le 6
+
+begin "Retry-After with a leading zero is decimal"
+on_push "$c2"
+start_app '[{"status": 503, "headers": {"Retry-After": "08"}, "body": {}}, '"$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "waits 8 s" 8 "$(<"$FAKE_SLEEP_LOG")"
+
+for after in "Wed, 21 Oct 2015 07:28:00 GMT" 99999 -5 9x; do
+	begin "Retry-After '$after' falls back to backoff"
+	on_push "$c2"
+	start_app "[{\"status\": 503, \"headers\": {\"Retry-After\": \"$after\"}, \"body\": {}}, $ok_answer]"
+	run_action "$origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "two uploads" 2 "$(requests upload)"
+	expect "the wait is the 5 s backoff" test "$(<"$FAKE_SLEEP_LOG")" -ge 4 -a "$(<"$FAKE_SLEEP_LOG")" -le 6
+done
+
+begin "App strings are never echoed raw: no workflow command, no markdown"
+on_push "$c2"
+start_app '[{"status": 200, "body": {"conclusion": "success\n::error::injected", "reason": "[click](https://evil.example)"}}]'
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "no injected workflow command in the log" bash -c '! grep -q "^::error::injected" "$1"' _ "$case_dir/log"
+expect "no injected link in the step summary" bash -c '! grep -q "evil.example" "$1"' _ "$GITHUB_STEP_SUMMARY"
+expect "the log says the values were unexpected" log_has "conclusion (unexpected value), reason (unexpected value)"
+
+begin "an unexpected error code is not echoed"
+on_push "$c2"
+start_app '[{"status": 400, "body": {"error": "x\n::error::injected"}}]'
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "no injected workflow command in the log" bash -c '! grep -q "^::error::injected" "$1"' _ "$case_dir/log"
 
 begin "no answer: retried"
 on_push "$c2"
@@ -432,6 +533,23 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
+prepare_with_endpoint() { # ENDPOINT: run prepare.sh alone; sets action_rc
+	on_push "$c2"
+	action_rc=0
+	ARCHFIT_ENDPOINT=$1 bash "$root/scripts/prepare.sh" >"$case_dir/log" 2>&1 || action_rc=$?
+}
+for endpoint in http://archfit.example https://archfit.example/ http://127.0.0.1:8080/ "https://user:pw@archfit.example" ftp://archfit.example; do
+	begin "endpoint '$endpoint' is refused"
+	prepare_with_endpoint "$endpoint"
+	expect_eq "prepare fails" 1 "$action_rc"
+	expect "the error explains the endpoint" log_has "endpoint must"
+done
+for endpoint in https://archfit.example https://archfit.example/app http://127.0.0.1:8080 http://localhost; do
+	begin "endpoint '$endpoint' is accepted"
+	prepare_with_endpoint "$endpoint"
+	expect_eq "prepare succeeds" 0 "$action_rc"
+done
+
 begin "an image of another engine version is refused before analysis"
 on_push "$c2"
 export FAKE_ENGINE_VERSION=v2.4.0
@@ -493,18 +611,40 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error names the default branch" log_has "default branch (main) only"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-begin "credentials persisted in .git/config never reach the engine container"
+# with_git_config NAME FILE KEY VALUE: run the steps with KEY=VALUE planted in FILE
+# (relative to the checkout's .git) between the checkout and the engine run.
+with_git_config() {
+	begin "credentials never reach the engine container: $1"
+	on_push "$c2"
+	action_rc=0
+	{
+		bash "$root/scripts/prepare.sh"
+		checkout "$origin" "$(out ref)"
+		mkdir -p "$(dirname "$GITHUB_WORKSPACE/.git/$2")"
+		git config --file "$GITHUB_WORKSPACE/.git/$2" "$3" "$4"
+		ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh"
+	} >"$case_dir/log" 2>&1 || action_rc=$?
+	expect_eq "the action fails" 1 "$action_rc"
+	expect "the error names the file" log_has "keeps credentials in $5"
+	expect_eq "no docker call" 0 "$(jq -s length "$FAKE_DOCKER_LOG")"
+}
+with_git_config "scoped extraheader" config http.https://github.com/.extraheader "AUTHORIZATION: basic c2VjcmV0" .git/config
+with_git_config "plain extraheader" config http.extraheader "AUTHORIZATION: basic c2VjcmV0" .git/config
+with_git_config "credential helper" config credential.helper store .git/config
+with_git_config "url insteadOf" config url.https://x-access-token:secret@github.com/.insteadOf https://github.com/ .git/config
+with_git_config "remote URL with userinfo" config remote.origin.url https://x-access-token:secret@github.com/acme/shop .git/config
+with_git_config "submodule config" modules/lib/config http.extraheader "AUTHORIZATION: basic c2VjcmV0" .git/modules/lib/config
+
+begin "a remote URL without userinfo is fine"
 on_push "$c2"
 action_rc=0
 {
 	bash "$root/scripts/prepare.sh"
 	checkout "$origin" "$(out ref)"
-	git -C "$GITHUB_WORKSPACE" config --local http.https://github.com/.extraheader "AUTHORIZATION: basic c2VjcmV0"
+	git -C "$GITHUB_WORKSPACE" config remote.origin.url https://github.com/acme/shop
 	ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh"
 } >"$case_dir/log" 2>&1 || action_rc=$?
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error explains the credential" log_has "keeps credentials in .git/config"
-expect_eq "no docker call" 0 "$(jq -s length "$FAKE_DOCKER_LOG")"
+expect_eq "the run succeeds" 0 "$action_rc"
 
 # --- Baseline capture -----------------------------------------------------------------
 

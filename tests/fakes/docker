@@ -56,10 +56,21 @@ for ((i = 0; i + 1 < ${#options[@]}; i++)); do
 		bundle=${options[i + 1]%:/bundle}
 	fi
 done
+# visible NAME prints the host file the container sees at /bundle/NAME: a file mounted
+# over that path wins over the writable directory, as in docker.
+visible() {
+	local i file=$bundle/$1
+	for ((i = 0; i + 1 < ${#options[@]}; i++)); do
+		[[ ${options[i]} != --volume || ${options[i + 1]} != *":/bundle/$1:ro" ]] ||
+			file=${options[i + 1]%":/bundle/$1:ro"}
+	done
+	printf '%s' "$file"
+}
 seen='{}'
 for name in .archfit.yaml .archfit-baseline.json .archfit-labels.yaml; do
-	if [[ -n $bundle && -f $bundle/$name ]]; then
-		digest=$({ sha256sum "$bundle/$name" 2>/dev/null || shasum -a 256 "$bundle/$name"; } | cut -d' ' -f1)
+	file=$(visible "$name")
+	if [[ -n $bundle && -f $file ]]; then
+		digest=$({ sha256sum "$file" 2>/dev/null || shasum -a 256 "$file"; } | cut -d' ' -f1)
 		seen=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$seen")
 	fi
 done
@@ -72,7 +83,7 @@ case ${1:-} in
 	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v2.3.1}"
 	;;
 check)
-	if [[ ! -f $bundle/.archfit.yaml ]]; then
+	if ! jq -e 'has(".archfit.yaml")' <<<"$seen" >/dev/null; then
 		echo "error: config not found: /bundle/.archfit.yaml" >&2
 		exit 3
 	fi

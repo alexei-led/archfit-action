@@ -40,34 +40,45 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   the input digests are claims the App compares with its manifest and the protected
   ref. Never word one as an attestation.
 - **The analysed commit comes from the event payload, never from the job context.** A
-  `pull_request` job's `GITHUB_SHA` is a merge commit; a `workflow_run` job runs the
-  default branch. `base_sha` is the event's `pull_request.base.sha` (the App compares
-  it with the API's `base.sha`); `merge_base_sha` is `git merge-base` of that and head.
-- **Trusted inputs come from git blobs, per file.** On a pull request a file comes from
-  head when merge-base..head changes it, else from the base tip; on other events from
-  the run's commit. Digests are taken before the container starts. Never read them
-  from the working tree (eol rules change the bytes).
+  `pull_request` job's `GITHUB_SHA` is a merge commit. `base_sha` is the event's
+  `pull_request.base.sha` (the App compares it with the API's `base.sha`);
+  `merge_base_sha` is the single `git merge-base --all` of that and head (several =
+  criss-cross, refused).
+- **Trusted inputs come from git blobs, per file.** On a pull request reported to the
+  App a file comes from head when merge-base..head changes it, else from the base tip.
+  Without an endpoint nobody checks owner approval, so every file comes from the base
+  tip, and a head that deletes the policy fails. Push and dispatch read the run's
+  commit. Digests are taken before the container starts. Never read them from the
+  working tree (eol rules change the bytes).
 - **The container gets nothing secret.** No `--env-file`, no bare `-e NAME` (it copies
   the host value), no `ACTIONS_*`, no token. `.git` is mounted read-only; refuse a
-  checkout with credentials in `.git/config`. The OIDC token is minted after the
-  container exits. Run no git on the runner after the container has run.
-- **The working tree is writable on purpose**: `uv run` writes `.venv` and `uv.lock`.
-  So is `/bundle`: the engine's fact cache lives next to the config and baseline mode
-  writes there; digests are taken before the container starts. Payloads are read from
-  stdout into `RUNNER_TEMP`, outside every mount. No `--base`: it needs a writable `.git`.
+  checkout with credential keys (`extraheader`, `credential.*`, `url.*.insteadOf`,
+  `includeIf.*`) or a userinfo remote URL in `.git/config` or `.git/modules/*/config`.
+  The OIDC token is minted after the container exits. Run no git on the runner after
+  the container has run.
+- **Inputs are read-only, the rest is writable on purpose.** Each trusted input is
+  mounted `:ro` over `/bundle/<name>`; `/bundle` itself is an empty writable directory
+  for the fact cache and a captured baseline. The working tree is writable: `uv run`
+  writes `.venv` and `uv.lock`. Payloads are read from stdout into `RUNNER_TEMP`,
+  outside every mount. No `--base`: it needs a writable `.git`.
+- **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
+  every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
+  in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the
+  App's `eligible()` table).
+- **The endpoint is https and exact.** No trailing slash (it is also the OIDC audience);
+  plain http only for 127.0.0.1/localhost. App answer fields are printed only when they
+  match their documented shape.
 - **Stay a composite action.** The App binds `job_workflow_ref` to the caller's workflow
   file; a reusable workflow would change that binding.
 - **Nested actions are pinned by full commit SHA**, with the tag in a comment. The App
   pins this action by commit; a tag inside it would make that commit's behaviour mutable.
 - **Retries only on 429, 5xx and no answer.** 409 is superseded (exit 0); every other
-  answer is final.
+  answer is final. `Retry-After` counts only as 1-4 decimal digits; else backoff.
 - **Fork pull requests cannot hold `id-token: write`.** They are analysed and kept as
   an artifact, never uploaded. Do not add a fallback that makes them look enforceable.
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.
   Never suggest `:latest` or a tag. The image platform must equal the runner's
   (`RUNNER_ARCH`); `engine_version` must equal the input. Both are checked before analysis.
-- **Only the events the App accepts.** Reports from `pull_request` and `push`; a
-  `workflow_dispatch` report is refused in `prepare.sh` (the App's `eligible()` table).
 
 ## Conventions
 

@@ -9,9 +9,11 @@ branding:
 inputs:
   endpoint:
     description: >-
-      archfit App base URL, for example https://archfit.example. Reports go to
-      <endpoint>/v1/reports and discovery drafts to <endpoint>/v1/discoveries.
-      Empty means analyze only: nothing is sent and a blocked verdict fails the job.
+      archfit App base URL over https, without a trailing slash, for example
+      https://archfit.example. Reports go to <endpoint>/v1/reports and discovery
+      drafts to <endpoint>/v1/discoveries. Empty means analyze only: nothing is sent,
+      pull requests are measured against the base branch's policy, baseline and
+      labels, and a blocked verdict fails the job.
     required: false
     default: ""
   audience:
@@ -82,6 +84,7 @@ runs:
       shell: bash
       env:
         ARCHFIT_MODE: ${{ steps.prepare.outputs.mode }}
+        ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
         ARCHFIT_ENGINE_VERSION: ${{ inputs.engine-version }}
         ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/run.sh"

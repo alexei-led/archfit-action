@@ -125,9 +125,9 @@ on_dispatch() { # SHA DISCOVER
 	export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_SHA=$1 ARCHFIT_DISCOVER=$2
 	event_file workflow_dispatch '.inputs.discover = $d' --arg d "$2"
 }
-on_workflow_run() { # HEAD DEFAULT_BRANCH_TIP
-	export GITHUB_EVENT_NAME=workflow_run GITHUB_REF=refs/heads/main GITHUB_SHA=$2
-	event_file workflow_run '.workflow_run.head_sha = $h' --arg h "$1"
+on_unsupported() { # EVENT HEAD DEFAULT_BRANCH_TIP: an event the action must refuse
+	export GITHUB_EVENT_NAME=$1 GITHUB_REF=refs/heads/main GITHUB_SHA=$3
+	event_file workflow_run '.workflow_run.head_sha = $h' --arg h "$2"
 }
 
 # out NAME prints the last value the steps wrote for output NAME.

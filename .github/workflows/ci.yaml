@@ -37,7 +37,7 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/state.json" \
             https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
           echo "5e21abbed182589685c88cbc8fa06a763982ca95bf47511c064611e0c0a11cb8  $RUNNER_TEMP/state.json" | sha256sum --check
-      - name: Envelopes for pull_request, push, discovery and workflow_run; transport; edge cases
+      - name: Envelopes for pull_request, push and discovery; refused events; transport; edge cases
         run: bash tests/run.sh
         env:
           ARCHFIT_TEST_STATE: ${{ runner.temp }}/state.json

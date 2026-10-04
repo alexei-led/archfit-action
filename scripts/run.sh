@@ -3,22 +3,25 @@
 #
 # Trusted inputs. The engine reads .archfit.yaml, .archfit-baseline.json and
 # .archfit-labels.yaml from the directory of its config. They are written from git
-# blobs into a bundle outside the checkout, never taken from the working tree, and
-# hashed before the container starts, so their digests name exactly the bytes the
-# engine read. Blob bytes are also what the App reads through the contents API;
-# working-tree bytes can differ under .gitattributes eol rules.
-# On a pull request each file comes from the head commit when the pull request
-# changes it (merge base..head, the diff behind GitHub's file list) and from the tip
-# of the base branch otherwise. The App trusts a head digest only when a policy owner
-# approved that exact head commit. Every other event reads the files from the
-# protected ref the run executed on.
+# blobs into RUNNER_TEMP, never taken from the working tree, and hashed before the
+# container starts, so their digests name exactly the bytes the engine read. Blob
+# bytes are also what the App reads through the contents API; working-tree bytes can
+# differ under .gitattributes eol rules.
+# On a pull request reported to the App, each file comes from the head commit when the
+# pull request changes it (merge base..head, the diff behind GitHub's file list) and
+# from the tip of the base branch otherwise. The App trusts a head digest only when a
+# policy owner approved that exact head commit. Without an endpoint nobody checks that
+# approval, so every file comes from the base tip. Push and dispatch runs read the
+# files from the protected ref the run executed on.
 #
-# Container. The checkout is mounted at /src with .git read-only, the bundle at
-# /bundle, HOME=/tmp, and nothing else: no token, no OIDC variable, no credential.
-# The working tree stays writable because analyzers write there (`uv run` creates
-# .venv and uv.lock in a Python project). .git is read-only so code that runs during
-# analysis cannot plant git config or hooks for git on the runner to execute later.
-# Reports are read from the engine's stdout into RUNNER_TEMP, outside every mount.
+# Container. The checkout is mounted at /src with .git read-only; each trusted input is
+# mounted read-only over /bundle/<name>; /bundle itself is an empty writable directory
+# for the engine's fact cache and a captured baseline. HOME=/tmp, and nothing else: no
+# token, no OIDC variable, no credential. The working tree stays writable because
+# analyzers write there (`uv run` creates .venv and uv.lock in a Python project). .git
+# is read-only so code that runs during analysis cannot plant git config or hooks for
+# git on the runner to execute later. Reports are read from the engine's stdout into
+# RUNNER_TEMP, outside every mount.
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -32,12 +35,14 @@ image_digest=${ARCHFIT_IMAGE_DIGEST:?}
 pinned_version=${ARCHFIT_ENGINE_VERSION:?}
 src=${GITHUB_WORKSPACE:?}
 event=${GITHUB_EVENT_NAME:?}
+endpoint=${ARCHFIT_ENDPOINT:-}
 work=$(work_dir)
-bundle=$work/bundle
+inputs=$work/inputs # the materialized trusted inputs, mounted read-only one by one
+bundle=$work/bundle # the engine's writable config directory
 out=$work/out
 engine_log=$out/engine.log
 image=$ENGINE_IMAGE_REPO@$image_digest
-mkdir -p "$bundle" "$out"
+mkdir -p "$inputs" "$bundle" "$out"
 : >"$work/inputs.tsv"
 
 head="" base_sha="" merge_base="" pull_request=0 fork=false input_tip=""
@@ -60,16 +65,14 @@ resolve_revisions() {
 		[[ $head_repo == "${GITHUB_REPOSITORY:?}" ]] || fork=true
 		git -C "$src" cat-file -e "$base_sha^{commit}" 2>/dev/null ||
 			die "base commit $base_sha is not in the fetched history"
-		merge_base=$(git -C "$src" merge-base "$base_sha" "$head") ||
+		merge_base=$(git -C "$src" merge-base --all "$base_sha" "$head") ||
 			die "no merge base between $base_sha and $head"
+		# After criss-cross merges git has several best merge bases and GitHub's compare
+		# picks one of them; the per-file input rule and the App's binding need exactly one.
+		[[ $merge_base != *$'\n'* ]] ||
+			die "$base_sha and $head have more than one merge base ($(tr '\n' ' ' <<<"$merge_base")); merge the base branch into the pull request so one merge base remains, then push"
 		input_tip=$(git -C "$src" rev-parse --verify --quiet "refs/remotes/origin/$base_ref^{commit}") ||
 			die "the base branch $base_ref was not fetched"
-		;;
-	workflow_run)
-		# Unsupported by the App (it answers unsupported_event); still state honestly
-		# which commit was analysed and read the inputs from the default branch.
-		head=$(event_field .workflow_run.head_sha)
-		input_tip=${GITHUB_SHA:?}
 		;;
 	*)
 		head=${GITHUB_SHA:?}
@@ -80,44 +83,71 @@ resolve_revisions() {
 	[[ $checked_out == "$head" ]] || die "the checkout is at $checked_out, not at the analysed commit $head"
 }
 
-# The container mounts .git, so a credential persisted in .git/config would reach it.
-assert_no_credentials() {
-	if git -C "$src" config --local --name-only \
-		--get-regexp '^(http\..+\.extraheader|includeif\..+|credential\..+)$' >/dev/null 2>&1; then
-		die "the checkout keeps credentials in .git/config, where the engine container would read them; let this action check out the repository (it uses persist-credentials: false)"
-	fi
+# Git config keys that carry or route credentials: auth headers, credential helpers,
+# URL rewrites (which can embed a token) and conditional includes.
+readonly CREDENTIAL_KEYS='^(http\.(.+\.)?extraheader|credential\..+|url\..+\.(push)?insteadof|includeif\..+)$'
+
+# git_config_has_credentials ARGS... checks one config file (git config ARGS selects it).
+git_config_has_credentials() {
+	git "$@" --name-only --get-regexp "$CREDENTIAL_KEYS" >/dev/null 2>&1 && return 0
+	# A remote URL with userinfo (https://user:token@host/...) carries the token itself.
+	git "$@" --get-regexp '^remote\..+\.(push)?url$' 2>/dev/null |
+		grep -Eq '^[^ ]+ [A-Za-z][A-Za-z0-9+.-]*://[^/@]*@'
 }
 
-# materialize PATH writes the trusted copy of PATH into the bundle and records where it
-# came from (base or head on a pull request, else ref). A PATH absent at the chosen
-# commit leaves no file and an empty digest.
+# The container mounts .git, so a credential persisted in any of its config files, the
+# repository's or a submodule's, would reach it.
+assert_no_credentials() {
+	local file
+	git_config_has_credentials -C "$src" config --local &&
+		die "the checkout keeps credentials in .git/config, where the engine container would read them; let this action check out the repository (it uses persist-credentials: false)"
+	[[ -d $src/.git/modules ]] || return 0
+	while IFS= read -r -d '' file; do
+		git_config_has_credentials config --file "$file" &&
+			die "the checkout keeps credentials in ${file#"$src/"}, where the engine container would read them; check out submodules without persisted credentials"
+	done < <(find "$src/.git/modules" -type f -name config -print0)
+	return 0
+}
+
+# materialize PATH writes the trusted copy of PATH into the inputs directory and records
+# where it came from (base or head on a pull request, else ref). A PATH absent at the
+# chosen commit leaves no file and an empty digest.
 materialize() {
 	local path=$1 rev=$input_tip from=ref rc=0 entry fmode ftype oid digest=""
 	if [[ $event == pull_request ]]; then
 		from=base
-		git -C "$src" diff --quiet --no-ext-diff "$merge_base" "$head" -- "$path" || rc=$?
-		case $rc in
-		0) ;;
-		1) rev=$head from=head ;;
-		*) die "git diff failed for $path" ;;
-		esac
+		# Head bytes only for an upload, where the App checks owner approval of the head.
+		if [[ -n $endpoint ]]; then
+			git -C "$src" diff --quiet --no-ext-diff "$merge_base" "$head" -- "$path" || rc=$?
+			case $rc in
+			0) ;;
+			1) rev=$head from=head ;;
+			*) die "git diff failed for $path" ;;
+			esac
+		fi
 	fi
-	rm -f "$bundle/$path"
+	rm -f "$inputs/$path"
 	entry=$(git -C "$src" ls-tree "$rev" -- "$path") || die "git ls-tree failed for $path at $rev"
 	if [[ -n $entry ]]; then
 		read -r fmode ftype oid <<<"${entry%%$'\t'*}"
 		[[ $ftype == blob && ($fmode == 100644 || $fmode == 100755) ]] ||
 			die "$path at $rev is not a regular file (git mode $fmode)"
-		git -C "$src" cat-file blob "$oid" >"$bundle/$path" || die "cannot read $path at $rev"
-		digest=$(sha256_hex "$bundle/$path")
+		git -C "$src" cat-file blob "$oid" >"$inputs/$path" || die "cannot read $path at $rev"
+		digest=$(sha256_hex "$inputs/$path")
 	fi
 	printf '%s\t%s\t%s\t%s\n' "$path" "$from" "$rev" "$digest" >>"$work/inputs.tsv"
 }
 
 # digest_of PATH prints the digest recorded when PATH was materialized ("" = absent).
 digest_of() { awk -F'\t' -v p="$1" '$1 == p { d = $4 } END { print d }' "$work/inputs.tsv"; }
+# source_of PATH prints the commit PATH was read from.
+source_of() { awk -F'\t' -v p="$1" '$1 == p { r = $3 } END { print r }' "$work/inputs.tsv"; }
 
 engine() {
+	local name mounts=()
+	for name in "${TRUSTED_INPUTS[@]}"; do
+		[[ ! -f $inputs/$name ]] || mounts+=(--volume "$inputs/$name:/bundle/$name:ro")
+	done
 	docker run --rm --pull never \
 		--user "$(id -u):$(id -g)" \
 		--cap-drop ALL --security-opt no-new-privileges \
@@ -125,6 +155,7 @@ engine() {
 		--volume "$src:/src" \
 		--volume "$src/.git:/src/.git:ro" \
 		--volume "$bundle:/bundle" \
+		${mounts[@]+"${mounts[@]}"} \
 		--workdir /src \
 		"$image" "$@"
 }
@@ -242,8 +273,14 @@ assert_no_credentials
 case $mode in
 report)
 	for path in "${TRUSTED_INPUTS[@]}"; do materialize "$path"; done
-	if [[ ! -f $bundle/.archfit.yaml ]]; then
-		notice "no .archfit.yaml at $input_tip; there is no policy to measure against. Dispatch this workflow with discover: true on the default branch to propose one."
+	# Without an App the base policy gates the pull request; a head that deletes it would
+	# otherwise pass as "measured" against a policy it no longer carries.
+	if [[ $event == pull_request && -z $endpoint && -f $inputs/.archfit.yaml ]] &&
+		[[ -z $(git -C "$src" ls-tree "$head" -- .archfit.yaml) ]]; then
+		die "this pull request deletes .archfit.yaml. Without an App endpoint no policy owner approves that, so the job fails; keep the policy, or report to the App so an owner can approve the deletion."
+	fi
+	if [[ ! -f $inputs/.archfit.yaml ]]; then
+		notice "no .archfit.yaml at $(source_of .archfit.yaml); there is no policy to measure against. Dispatch this workflow with discover: true on the default branch to propose one."
 		write_facts
 		exit 0
 	fi
@@ -266,7 +303,7 @@ baseline)
 	# baseline here, so only the policy and the labels are materialized.
 	materialize .archfit.yaml
 	materialize .archfit-labels.yaml
-	[[ -f $bundle/.archfit.yaml ]] || die "no .archfit.yaml at $input_tip; a baseline needs a policy"
+	[[ -f $inputs/.archfit.yaml ]] || die "no .archfit.yaml at $(source_of .archfit.yaml); a baseline needs a policy"
 	engine_identity
 	engine baseline -c /bundle/.archfit.yaml --root /src >"$engine_log" 2>&1 ||
 		engine_failed "archfit could not capture a baseline"
@@ -275,7 +312,9 @@ baseline)
 	[[ -f $captured && ! -L $captured ]] || die "archfit wrote no baseline file"
 	payload=$out/.archfit-baseline.json
 	cp "$captured" "$payload"
-	# The capture is only useful when this image finds it comparable.
+	# The capture is only useful when this image finds it comparable. The self-check
+	# reads the copy, mounted read-only like every other input.
+	cp "$payload" "$inputs/.archfit-baseline.json"
 	check "$out/archfit-state.json"
 	status=$(jq -r '.gate_reference.status // ""' "$out/archfit-state.json")
 	[[ $status == comparable ]] ||
