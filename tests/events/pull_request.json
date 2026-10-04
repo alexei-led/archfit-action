@@ -1,0 +1,19 @@
+{
+  "action": "synchronize",
+  "number": 42,
+  "pull_request": {
+    "number": 42,
+    "state": "open",
+    "head": {
+      "ref": "feature",
+      "sha": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "repo": { "full_name": "acme/shop" }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+      "repo": { "full_name": "acme/shop" }
+    }
+  },
+  "repository": { "full_name": "acme/shop", "default_branch": "main" }
+}

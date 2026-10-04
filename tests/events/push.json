@@ -1,0 +1,6 @@
+{
+  "ref": "refs/heads/main",
+  "before": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+  "after": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+  "repository": { "full_name": "acme/shop", "default_branch": "main" }
+}

@@ -1,47 +1,106 @@
 name: archfit
-description: Report an archfit architecture-state document to the archfit GitHub App
+description: Run the pinned archfit engine image on this repository and report the architecture state to the archfit GitHub App
 author: alexei-led
 branding:
   icon: git-branch
   color: purple
 
+# Input names are the ones the archfit App writes into its generated workflow.
 inputs:
-  state-file:
-    description: Path to the archfit.architecture-state.v1 document produced by `archfit check --json`.
-    required: false
-    default: archfit-state.json
   endpoint:
     description: >-
-      archfit App ingest URL. When empty the envelope is written to `envelope-file`
-      and nothing is sent — which is the supported way to use this action before
-      the App backend is available to you.
+      archfit App base URL, for example https://archfit.example. Reports go to
+      <endpoint>/v1/reports and discovery drafts to <endpoint>/v1/discoveries.
+      Empty means analyze only: nothing is sent and a blocked verdict fails the job.
     required: false
     default: ""
-  envelope-file:
-    description: Where to write the assembled envelope.
-    required: false
-    default: archfit-envelope.json
   audience:
-    description: OIDC audience to request the token for. Only used when `endpoint` is set.
+    description: >-
+      OIDC audience of the upload token. Empty means the endpoint, verbatim; the App
+      accepts exactly its base URL.
     required: false
-    default: archfit-app
+    default: ""
+  engine-version:
+    description: Engine release of the image, for example v2.3.1. The action refuses an image that reports another version.
+    required: true
+  image-digest:
+    description: >-
+      Per-platform manifest digest of ghcr.io/alexei-led/archfit (sha256:<64 hex>),
+      as listed in the App's manifest. Tags are refused.
+    required: true
+  mode:
+    description: >-
+      report (measure and upload the state), discovery (propose a first policy) or
+      baseline (capture accepted debt as an artifact). Empty means report, or
+      discovery when `discover` is true. Discovery and baseline run on the default branch only.
+    required: false
+    default: ""
+  discover:
+    description: "`true` selects discovery mode. The generated workflow passes its boolean dispatch input here."
+    required: false
+    default: "false"
 
 outputs:
-  envelope-file:
-    description: Path of the written envelope.
-    value: ${{ steps.report.outputs.envelope-file }}
   verdict:
-    description: The verdict carried by the state document.
-    value: ${{ steps.report.outputs.verdict }}
+    description: Engine verdict (healthy, needs_attention or blocked); empty when nothing was measured.
+    value: ${{ steps.run.outputs.verdict }}
+  payload-file:
+    description: The state report, discovery draft or baseline the engine produced; empty when nothing was measured.
+    value: ${{ steps.run.outputs.payload-file }}
+  envelope-file:
+    description: The archfit.report-envelope.v1 line, exactly as sent in the X-Archfit-Envelope header; empty when none was written.
+    value: ${{ steps.report.outputs.envelope-file }}
+  app-status:
+    description: HTTP status of the App's final answer, "000" when no answer arrived; empty when nothing was sent.
+    value: ${{ steps.report.outputs.app-status }}
+  app-answer:
+    description: The App's JSON answer on one line, for example {"conclusion":"success","reason":"healthy"}.
+    value: ${{ steps.report.outputs.app-answer }}
 
 runs:
   using: composite
   steps:
+    - id: prepare
+      shell: bash
+      env:
+        ARCHFIT_ENGINE_VERSION: ${{ inputs.engine-version }}
+        ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
+        ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
+        ARCHFIT_MODE: ${{ inputs.mode }}
+        ARCHFIT_DISCOVER: ${{ inputs.discover }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
+
+    # Full history for the merge base and the engine's history evidence; no credential
+    # left in .git/config, which the engine container mounts.
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ steps.prepare.outputs.ref }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - id: run
+      shell: bash
+      env:
+        ARCHFIT_MODE: ${{ steps.prepare.outputs.mode }}
+        ARCHFIT_ENGINE_VERSION: ${{ inputs.engine-version }}
+        ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/run.sh"
+
+    # Before the upload, so the result survives a failed upload. archfit-report is the
+    # name the App's graph view reads: one file, the exact report bytes.
+    - if: steps.run.outputs.payload-file != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.run.outputs.artifact-name }}
+        path: ${{ steps.run.outputs.payload-file }}
+        if-no-files-found: error
+        include-hidden-files: true
+        overwrite: true
+
     - id: report
       shell: bash
       env:
-        ARCHFIT_STATE_FILE: ${{ inputs.state-file }}
+        ARCHFIT_FACTS: ${{ steps.run.outputs.facts-file }}
         ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
-        ARCHFIT_ENVELOPE_FILE: ${{ inputs.envelope-file }}
         ARCHFIT_AUDIENCE: ${{ inputs.audience }}
-      run: ${GITHUB_ACTION_PATH}/scripts/report.sh
+      run: bash "${GITHUB_ACTION_PATH}/scripts/report.sh"

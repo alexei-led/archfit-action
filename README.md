@@ -1,104 +1,198 @@
 # archfit-action
 
 Run [archfit](https://github.com/alexei-led/archfit) in CI and report the
-architecture state it produced.
+architecture state to the archfit GitHub App.
 
-The analysis runs in **your** runner, not on our servers: archfit's facts come
-from `go list`, dependency-cruiser, grimp, `cargo metadata`, ast-grep and jscpd,
-so measuring your repository needs your toolchain and your private-dependency
-credentials. This action carries the result out; it does not analyze anything
-itself.
-
-## Status
-
-Early. The action assembles and writes the report envelope today. Sending it to
-the archfit App is wired but the App backend is not generally available, so the
-useful mode right now is the default one: **no `endpoint`, envelope written to a
-file**, which also makes the report a normal build artifact you can inspect.
+The analysis runs in **your** runner, inside the pinned engine image. The action
+checks out the commit, gives the engine the policy, baseline and labels from the
+protected ref, runs the image, and sends the report with an OIDC-authenticated
+upload. Nothing is analyzed on archfit's servers.
 
 ## Usage
 
+The archfit App generates this workflow during onboarding. It pins the action by
+commit and the engine image by digest:
+
 ```yaml
 name: archfit
-on: [pull_request, push]
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      discover:
+        description: Propose a policy for review instead of reporting state
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  architecture:
+  archfit:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write          # only needed once `endpoint` is set
-    container:
-      image: ghcr.io/alexei-led/archfit:v2.2.1
-      options: --user root     # the workspace is mounted as root
     steps:
-      - uses: actions/checkout@v4
+      - uses: alexei-led/archfit-action@<40-hex commit>
         with:
-          fetch-depth: 0       # `--base` needs the base ref present
-
-      - uses: actions/cache@v4
-        with:
-          path: .archfit-cache
-          key: archfit-facts-${{ hashFiles('go.sum', 'package-lock.json', 'Cargo.lock') }}
-
-      - name: Analyze
-        run: archfit check --json -c .archfit.yaml > archfit-state.json || true
-
-      - uses: alexei-led/archfit-action@v1
-        with:
-          state-file: archfit-state.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: archfit-state
-          path: |
-            archfit-state.json
-            archfit-envelope.json
+          endpoint: "https://<archfit App>"
+          audience: "https://<archfit App>"
+          engine-version: "v2.3.1"
+          image-digest: "sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793"
+          discover: ${{ inputs.discover }}
 ```
 
-Pin the analyzer image by digest rather than tag when you care about comparable
-results over time: the analyzer version is part of what produced the facts.
+Do not add a checkout step: the action does its own, without persisted
+credentials. Without `endpoint` the action analyzes only: nothing is sent, the
+report is a workflow artifact, and a `blocked` verdict fails the job.
+
+## Modes
+
+| Mode | Engine command | Payload | Sent to |
+| --- | --- | --- | --- |
+| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src` | state report | `<endpoint>/v1/reports` |
+| `discovery` (`discover: true`) | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
+| `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | nothing yet: artifact only |
+
+Discovery and baseline run on the default branch only. Reports come from
+`pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode is
+refused before any work, because the App accepts a dispatched run only as
+discovery. Baseline mode fails unless
+the engine finds the captured baseline comparable in the same image. Commit the
+`archfit-baseline` artifact as `.archfit-baseline.json` in a pull request that a
+policy owner approves. A baseline captured on a laptop is not comparable: the
+measurement profile records the platform and the tool versions.
+
+Each mode uploads its payload as a workflow artifact: `archfit-report` (the name
+the App's graph view reads), `archfit-policy` or `archfit-baseline`.
 
 ## Inputs
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `state-file` | `archfit-state.json` | The `archfit.architecture-state.v1` document to report. |
-| `endpoint` | *(empty)* | App ingest URL. Empty means assemble the envelope and send nothing. |
-| `envelope-file` | `archfit-envelope.json` | Where the envelope is written. |
-| `audience` | `archfit-app` | OIDC audience, used only when `endpoint` is set. |
+| `endpoint` | *(empty)* | App base URL. The action appends `/v1/reports` or `/v1/discoveries`. Empty means analyze only. |
+| `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v2.3.1`. An image that reports another version is refused. |
+| `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
+| `mode` | *(empty)* | `report`, `discovery` or `baseline`. Empty means `report`, or `discovery` when `discover` is true. |
+| `discover` | `false` | `true` selects discovery. The generated workflow passes its dispatch input here. |
 
 ## Outputs
 
 | Output | Meaning |
 | --- | --- |
-| `envelope-file` | Path of the written envelope. |
-| `verdict` | `healthy`, `needs_attention` or `blocked`, as the document declares it. |
+| `verdict` | `healthy`, `needs_attention` or `blocked`; empty when nothing was measured. |
+| `payload-file` | The report, draft policy or baseline the engine produced. |
+| `envelope-file` | The envelope, exactly as sent in the `X-Archfit-Envelope` header. |
+| `app-status` | HTTP status of the App's final answer; `000` when no answer arrived; empty when nothing was sent. |
+| `app-answer` | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`. |
 
-## What the envelope is, and is not
+The job status covers the run and the upload. On an accepted upload the App's
+checks carry the verdict.
 
-The envelope states **what was analysed**: repository, pull request, head SHA,
-base SHA, merge base, and the report's digest. It reads those from the event
-payload rather than from the job's own context, because a `workflow_run`
--triggered job runs the default branch's workflow definition and its
-`GITHUB_SHA` is that context — not the pull request's.
+## Trusted inputs
+
+The engine reads `.archfit.yaml`, `.archfit-baseline.json` and
+`.archfit-labels.yaml` from a bundle directory outside the checkout. The action
+writes each file from its git blob, never from the working tree, and hashes it
+before the engine starts:
+
+- On a pull request, a file comes from the head commit when the pull request
+  changes it (merge base to head, the diff behind GitHub's file list). Otherwise
+  it comes from the tip of the base branch. The App trusts a head digest only when
+  a policy owner approved that exact head commit.
+- On every other event, the files come from the commit the run executed on.
+- A missing file gives an empty digest. Without `.archfit.yaml` there is nothing
+  to measure: the run says so and sends nothing.
+
+## The envelope
+
+The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 16 flat
+typed keys. [`schema/`](schema/) holds the vendored copy, and
+[`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
+sha256. CI validates the envelopes the action builds for `pull_request`, `push`,
+`workflow_dispatch` discovery and `workflow_run` events against it.
+
+The envelope states what was analysed: repository, event, pull request, head,
+base and merge base, run, engine identity, and the digests of the payload and of
+the baseline and labels files the engine read. Head, base and pull request come
+from the event payload, never from the job context: a `pull_request` job's
+`GITHUB_SHA` is a merge commit, and a `workflow_run` job runs the default branch.
 
 It is **not** a security claim. Every field is self-reported by a job that runs
-code from the pull request. The authoritative provenance — which workflow
-definition ran, on which repository, at which attempt — lives in the OIDC
-token's claims, which only the receiving service can verify. A report produced
-by a job definition the pull request could edit can never satisfy a required
-gate, however well-formed its envelope.
+pull-request code. The App binds the envelope to the OIDC token's claims and to
+GitHub's own data and trusts no field alone. The measurement is
+customer-attested.
 
-Fork pull requests cannot be granted `id-token: write` at all, so they have no
-path to an authenticated upload. Treat their reports as advisory evidence.
+## Upload
+
+One `POST` per attempt: `Authorization: Bearer <OIDC token>`, the envelope in
+`X-Archfit-Envelope`, the exact payload bytes as the body.
+
+- Pre-checks: report at most 5 MiB, draft policy at most 1 MiB, envelope at most
+  8192 bytes on one line.
+- Retries: on 429, 5xx and no answer, up to 5 attempts within 300 s. The wait
+  is `Retry-After` (at most 120 s), or 5 s doubling with ±20% jitter. Each
+  attempt mints a fresh OIDC token.
+- 409 means a newer commit or run attempt supersedes the upload: a notice, not a
+  failure. Every other answer is final; the error names the App's code and the fix.
+
+## Edge cases
+
+- **Fork pull requests** get no OIDC token from GitHub. The action analyzes and
+  keeps the report as an artifact, sends nothing, and exits 0. The App marks the
+  pull request `fork_unsupported`.
+- **No policy** on the protected ref: nothing is measured or sent. Dispatch the
+  workflow with `discover: true` on the default branch.
+- **Engine exit 3** (no report): the job fails with the engine's last lines and
+  sends nothing.
+
+## The container
+
+The engine runs as `docker run ghcr.io/alexei-led/archfit@<digest>` with:
+
+- the workspace owner's uid and gid, `HOME=/tmp`, all capabilities dropped, and
+  no other environment: no token, no OIDC variable, no credential;
+- the checkout at `/src`, its `.git` read-only, and the bundle at `/bundle`.
+
+The working tree stays writable because analyzers write there: `uv run` creates
+`.venv` and `uv.lock` in a Python project. Treat the checkout as scratch after
+the action ran. The engine's repair commands name the container layout
+(`archfit check -c /bundle/.archfit.yaml --root /src`); run
+`archfit check -c .archfit.yaml` locally.
+
+The bundle stays writable too: the engine keeps its fact cache
+(`.archfit-cache/`) next to the config, and baseline mode writes
+`.archfit-baseline.json` there. The digests are taken before the container
+starts, so a write cannot change what the envelope names.
+
+The action does not pass `--base`: the engine would create a git worktree, which
+the read-only `.git` forbids. The report therefore has no merge-base
+comparison, and agent-task origins against the merge base are not computed.
+
+Dependencies the analyzers fetch (Go modules, grimp) come from public
+registries. The container gets no credentials for private ones.
 
 ## Requirements
 
-`jq`, `curl` and `git` on PATH. The `ghcr.io/alexei-led/archfit` image ships
-all three. The action refuses a document whose `schema_version` is not
-`archfit.architecture-state.v1` rather than forwarding a shape the receiver
-would have to guess at.
+A Linux runner with `docker`, `git`, `jq` and `curl`; `ubuntu-latest` has all of
+them. The job needs `id-token: write` once `endpoint` is set. The image
+platform must equal the runner's (`X64` → `linux/amd64`, `ARM64` →
+`linux/arm64`): pin the digest the App's manifest lists for that platform.
+
+## Development
+
+```sh
+curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
+ARCHFIT_TEST_STATE=/tmp/state.json bash tests/run.sh   # needs git, jq, curl, python3, go
+bash tests/engine-smoke.sh                             # needs docker and network
+shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
+```
+
+`tests/run.sh` runs the shipped scripts against scratch repositories, with a
+docker shim, a local App and token server, and a no-op `sleep`.
+`tests/engine-smoke.sh` runs the real pinned image.
 
 ## License
 

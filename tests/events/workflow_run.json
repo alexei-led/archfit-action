@@ -1,0 +1,10 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "event": "pull_request",
+    "head_branch": "feature",
+    "head_sha": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "pull_requests": [{ "number": 42 }]
+  },
+  "repository": { "full_name": "acme/shop", "default_branch": "main" }
+}
