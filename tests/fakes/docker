@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Test double for the docker CLI. It stands in for the archfit engine image so the
+# action's scripts run unchanged, and appends every call to FAKE_DOCKER_LOG as one
+# JSON line: the options, the engine arguments, and the digests of the bundle files
+# the "container" was given.
+#
+#   FAKE_DOCKER_LOG           JSON lines, one per call (required)
+#   FAKE_STATE                document that `check` prints
+#   FAKE_DRAFT                document that `config init` prints
+#   FAKE_ENGINE_VERSION       version that `--version` reports (default v2.3.1)
+#   FAKE_PLATFORM             os/arch that `image inspect` reports (default linux/amd64)
+#   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
+#                             and 3 prints no report, as the engine does
+#   FAKE_BASELINE_COMPARABLE  false keeps gate_reference non_comparable after `baseline`
+#   FAKE_BASELINE             file that `baseline` writes as the capture (default: an empty v2 baseline)
+# shellcheck disable=SC2016 # single-quoted $names are jq's
+set -euo pipefail
+
+log=${FAKE_DOCKER_LOG:?}
+captured=$(dirname "$log")/baseline-captured
+
+record() { jq -cn "$@" >>"$log"; }
+# json_array ARGS... prints the arguments as a JSON array of strings.
+json_array() { (($#)) && printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1]' || echo '[]'; }
+
+command=$1
+shift
+case $command in
+pull | image)
+	record --arg command "$command" --argjson args "$(json_array "$@")" '{command: $command, args: $args}'
+	[[ $command == pull ]] || printf '%s\n' "${FAKE_PLATFORM:-linux/amd64}"
+	exit 0
+	;;
+run) ;;
+*)
+	echo "fake docker: unsupported command $command" >&2
+	exit 125
+	;;
+esac
+
+# docker run [OPTIONS] IMAGE [ARGS]: the options end at the image reference.
+options=()
+while (($#)) && [[ $1 != ghcr.io/* ]]; do
+	options+=("$1")
+	shift
+done
+if ((! $#)); then
+	echo "fake docker: no image reference" >&2
+	exit 125
+fi
+image=$1
+shift
+
+bundle=""
+for ((i = 0; i + 1 < ${#options[@]}; i++)); do
+	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/bundle ]]; then
+		bundle=${options[i + 1]%:/bundle}
+	fi
+done
+# visible NAME prints the host file the container sees at /bundle/NAME: a file mounted
+# over that path wins over the writable directory, as in docker.
+visible() {
+	local i file=$bundle/$1
+	for ((i = 0; i + 1 < ${#options[@]}; i++)); do
+		[[ ${options[i]} != --volume || ${options[i + 1]} != *":/bundle/$1:ro" ]] ||
+			file=${options[i + 1]%":/bundle/$1:ro"}
+	done
+	printf '%s' "$file"
+}
+seen='{}'
+for name in .archfit.yaml .archfit-baseline.json .archfit-labels.yaml; do
+	file=$(visible "$name")
+	if [[ -n $bundle && -f $file ]]; then
+		digest=$({ sha256sum "$file" 2>/dev/null || shasum -a 256 "$file"; } | cut -d' ' -f1)
+		seen=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$seen")
+	fi
+done
+record --arg image "$image" --argjson bundle "$seen" \
+	--argjson options "$(json_array "${options[@]}")" --argjson args "$(json_array "$@")" \
+	'{command: "run", image: $image, options: $options, args: $args, bundle: $bundle}'
+
+case ${1:-} in
+--version)
+	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v2.3.1}"
+	;;
+check)
+	if ! jq -e 'has(".archfit.yaml")' <<<"$seen" >/dev/null; then
+		echo "error: config not found: /bundle/.archfit.yaml" >&2
+		exit 3
+	fi
+	if [[ ${FAKE_CHECK_RC:-} == 3 ]]; then
+		printf 'error: analyzer go/packages failed: go list exited 1\n→ run: archfit doctor\n' >&2
+		exit 3
+	fi
+	echo "fake engine: check /src" >&2
+	if [[ -f $captured && ${FAKE_BASELINE_COMPARABLE:-true} == true ]]; then
+		jq '.gate_reference = {status: "comparable", base_ref: "baseline", reasons: []}' "${FAKE_STATE:?}"
+	else
+		cat "${FAKE_STATE:?}"
+	fi
+	exit "${FAKE_CHECK_RC:-$(jq -r '{healthy: 0, blocked: 1, needs_attention: 2}[.verdict] // 3' "$FAKE_STATE")}"
+	;;
+config)
+	cat "${FAKE_DRAFT:?}"
+	;;
+baseline)
+	if [[ -n ${FAKE_BASELINE:-} ]]; then
+		cp "$FAKE_BASELINE" "$bundle/.archfit-baseline.json"
+	else
+		printf '{"schema_version":"archfit.baseline.v2","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
+	fi
+	: >"$captured"
+	echo "baseline saved: /bundle/.archfit-baseline.json"
+	;;
+*)
+	echo "fake docker: unsupported engine arguments: $*" >&2
+	exit 3
+	;;
+esac

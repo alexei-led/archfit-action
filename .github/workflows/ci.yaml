@@ -12,42 +12,66 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: shellcheck
-        run: shellcheck scripts/*.sh
+        run: shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
       - name: action.yml is valid YAML
-        run: python3 -c "import yaml,sys; yaml.safe_load(open('action.yml'))"
+        run: python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
 
-  smoke:
-    name: Smoke — envelope from a real state document
+  conformance:
+    name: Conformance — envelope schema, transport, edge cases
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Fetch a published state document to report
-        run: |
-          # The archfit repo commits real architecture-state documents as test
-          # baselines. Using one keeps this smoke test honest: the action is
-          # exercised against a document archfit actually emitted, not a stub
-          # written to match the action's expectations.
-          curl -fsSL -o archfit-state.json \
-            https://raw.githubusercontent.com/alexei-led/archfit/main/internal/extract/golang/testdata/single-module/baseline.json
-          jq -r '.schema_version, .verdict' archfit-state.json
-      - uses: ./
-        id: report
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          state-file: archfit-state.json
-      - name: The envelope names what was analysed
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/validate/go.mod
+          cache: false
+      - name: Fetch a real engine state document (archfit v2.3.1, pinned by commit and sha256)
         run: |
-          jq . archfit-envelope.json
-          test "$(jq -r '.schema_version' archfit-envelope.json)" = "archfit.report-envelope.v1"
-          test -n "$(jq -r '.report.digest' archfit-envelope.json)"
-          test "$(jq -r '.report.verdict' archfit-envelope.json)" = "${{ steps.report.outputs.verdict }}"
-      - name: A document from another contract is refused
-        run: |
-          echo '{"schema_version":"something.else.v9"}' > wrong.json
-          if ${GITHUB_WORKSPACE}/scripts/report.sh; then
-            echo "expected a refusal" >&2; exit 1
-          fi
+          # A document the engine emitted, never a stub written to match this action.
+          curl -fsSL -o "$RUNNER_TEMP/state.json" \
+            https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
+          echo "5e21abbed182589685c88cbc8fa06a763982ca95bf47511c064611e0c0a11cb8  $RUNNER_TEMP/state.json" | sha256sum --check
+      - name: Envelopes for pull_request, push, discovery and baseline; refused events; transport; edge cases
+        run: bash tests/run.sh
         env:
-          ARCHFIT_STATE_FILE: wrong.json
-        continue-on-error: false
+          ARCHFIT_TEST_STATE: ${{ runner.temp }}/state.json
+
+  engine:
+    name: Pinned engine image (v2.3.1, linux/amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/validate/go.mod
+          cache: false
+      - name: Report, baseline capture, comparable report
+        run: bash tests/engine-smoke.sh
+
+  action:
+    name: Composite wiring (this repository has no policy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: archfit
+        uses: ./
+        with:
+          engine-version: v2.3.1
+          image-digest: sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793
+      - name: Nothing was measured or sent
+        env:
+          VERDICT: ${{ steps.archfit.outputs.verdict }}
+          PAYLOAD: ${{ steps.archfit.outputs.payload-file }}
+          ENVELOPE: ${{ steps.archfit.outputs.envelope-file }}
+          APP_STATUS: ${{ steps.archfit.outputs.app-status }}
+        run: test -z "$VERDICT$PAYLOAD$ENVELOPE$APP_STATUS"

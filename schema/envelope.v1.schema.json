@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://archfit.dev/schemas/report-envelope.v1.json",
+  "title": "archfit report envelope v1",
+  "description": "What the producer states about one uploaded payload. Every field is self-reported. The decoder is stricter than this document in three ways a schema cannot express: integers carry no fraction or exponent and are bounded (run_id to 64 bits, the others to 32), and the raw envelope is at most 8192 bytes with no duplicate keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "repository",
+    "event",
+    "pull_request",
+    "head_sha",
+    "base_sha",
+    "merge_base_sha",
+    "run_id",
+    "run_attempt",
+    "engine_version",
+    "image_digest",
+    "platform",
+    "payload_digest",
+    "baseline_digest",
+    "labels_digest"
+  ],
+  "properties": {
+    "schema_version": { "const": "archfit.report-envelope.v1" },
+    "kind": { "enum": ["report", "discovery", "baseline"] },
+    "repository": {
+      "type": "string",
+      "description": "owner/name",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "event": {
+      "type": "string",
+      "description": "The workflow trigger. Format only: an unsupported trigger is an outcome, not a parse error.",
+      "pattern": "^[a-z_]{1,64}$"
+    },
+    "pull_request": {
+      "type": "integer",
+      "description": "Pull request number; 0 unless event is pull_request.",
+      "minimum": 0
+    },
+    "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "base_sha": {
+      "type": "string",
+      "description": "Empty unless event is pull_request.",
+      "pattern": "^([0-9a-f]{40})?$"
+    },
+    "merge_base_sha": {
+      "type": "string",
+      "description": "Empty unless event is pull_request.",
+      "pattern": "^([0-9a-f]{40})?$"
+    },
+    "run_id": { "type": "integer", "minimum": 1 },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "engine_version": { "type": "string", "pattern": "^[A-Za-z0-9._+-]{1,64}$" },
+    "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "platform": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$",
+      "maxLength": 32
+    },
+    "payload_digest": {
+      "type": "string",
+      "description": "sha256:<hex> of the exact payload bytes.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "baseline_digest": {
+      "type": "string",
+      "description": "Bare hex SHA-256 of the baseline file the engine loaded; empty when it loaded none.",
+      "pattern": "^([0-9a-f]{64})?$"
+    },
+    "labels_digest": {
+      "type": "string",
+      "description": "Bare hex SHA-256 of the labels file the engine loaded; empty when it loaded none.",
+      "pattern": "^([0-9a-f]{64})?$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event": { "const": "pull_request" } },
+        "required": ["event"]
+      },
+      "then": {
+        "properties": {
+          "pull_request": { "minimum": 1 },
+          "base_sha": { "pattern": "^[0-9a-f]{40}$" },
+          "merge_base_sha": { "pattern": "^[0-9a-f]{40}$" }
+        }
+      },
+      "else": {
+        "properties": {
+          "pull_request": { "const": 0 },
+          "base_sha": { "const": "" },
+          "merge_base_sha": { "const": "" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "discovery" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "baseline_digest": { "const": "" },
+          "labels_digest": { "const": "" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "baseline" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "baseline_digest": { "const": "" }
+        }
+      }
+    }
+  ]
+}
