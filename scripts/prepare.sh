@@ -12,7 +12,6 @@ engine_version=${ARCHFIT_ENGINE_VERSION:-}
 image_digest=${ARCHFIT_IMAGE_DIGEST:-}
 endpoint=${ARCHFIT_ENDPOINT:-}
 mode=${ARCHFIT_MODE:-}
-discover=${ARCHFIT_DISCOVER:-}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
 	die "engine-version '$engine_version' is not a version such as v3.0.0"
@@ -29,19 +28,10 @@ if [[ -n $endpoint ]]; then
 	[[ $endpoint != */ ]] || die "endpoint must not end with '/'; give the App base URL exactly, for example https://archfit.example"
 fi
 
-# The generated workflow passes its boolean dispatch input as `discover`: "true" on a
-# discovery dispatch, "false" on a plain dispatch, "" on pull_request and push.
-case $discover in
-true)
-	[[ -z $mode || $mode == discovery ]] || die "mode '$mode' conflicts with discover: true"
-	mode=discovery
-	;;
-'' | false) mode=${mode:-report} ;;
-*) die "discover must be true or false, got '$discover'" ;;
-esac
+mode=${mode:-report}
 case $mode in
-report | discovery | baseline) ;;
-*) die "mode must be report, discovery or baseline, got '$mode'" ;;
+report | discovery | baseline | reanchor) ;;
+*) die "mode must be report, discovery, baseline or reanchor, got '$mode'" ;;
 esac
 
 # Only the events the App accepts. The others are refused before the checkout:
@@ -53,10 +43,10 @@ case $event in
 pull_request | push | workflow_dispatch) ;;
 *) die "archfit runs on pull_request, push and workflow_dispatch events only; '$event' is refused before the checkout. Trigger the archfit workflow with one of those events." ;;
 esac
-# The App accepts a dispatched run only as discovery or baseline; a dispatched report would end as
-# unsupported_event, so it is refused before any work.
+# The App accepts a dispatched run only as discovery, baseline or reanchor; a dispatched report would
+# end as unsupported_event, so it is refused before any work.
 [[ $event != workflow_dispatch || $mode != report ]] ||
-	die "a workflow_dispatch run does not report: dispatch with discover: true to propose a policy, or set mode: baseline. Reports come from pull_request and push runs."
+	die "a workflow_dispatch run does not report: set mode: discovery to propose a policy, mode: baseline to capture accepted debt or mode: reanchor to carry it to this engine. Reports come from pull_request and push runs."
 # The analysed commit comes from the event payload, never from the job context: a
 # pull_request job's GITHUB_SHA is a merge commit.
 case $event in
@@ -65,8 +55,8 @@ pull_request) ref=$(event_field .pull_request.head.sha) ;;
 esac
 is_sha "$ref" || die "cannot tell which commit this $event event analyses (got '$ref')"
 
-# Discovery proposes the first policy and baseline captures accepted debt; both describe
-# the protected default branch, so neither runs anywhere else.
+# Discovery proposes the first policy; baseline and reanchor capture accepted debt. All
+# describe the protected default branch, so none runs anywhere else.
 if [[ $mode != report ]]; then
 	default_branch=$(event_field .repository.default_branch)
 	[[ -n $default_branch && ${GITHUB_REF:-} == "refs/heads/$default_branch" ]] ||

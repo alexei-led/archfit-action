@@ -1,5 +1,5 @@
 {
   "ref": "refs/heads/main",
-  "inputs": { "discover": "true" },
+  "inputs": {},
   "repository": { "full_name": "acme/shop", "default_branch": "main" }
 }

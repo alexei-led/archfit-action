@@ -4,6 +4,7 @@
 # JSON line: the options, the engine arguments, and the digests of the bundle files
 # the "container" was given.
 #
+#   FAKE_FIXTURES             directory of the re-anchor fixtures (tests/fixtures)
 #   FAKE_DOCKER_LOG           JSON lines, one per call (required)
 #   FAKE_STATE                document that `check` prints
 #   FAKE_DRAFT                document that `config init` prints
@@ -12,11 +13,15 @@
 #   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
 #                             and 3 prints no report, as the engine does
 #   FAKE_BASELINE_COMPARABLE  false keeps gate_reference non_comparable after `baseline`
-#   FAKE_BASELINE             file that `baseline` writes as the capture (default: an empty v2 baseline)
+#   FAKE_BASELINE             file that `baseline` writes as the capture (default: an empty v3 baseline)
+#   FAKE_REANCHOR_BASELINE    file that `baseline --reanchor` writes (default: tests/fixtures/reanchored-baseline.json)
+#   FAKE_REANCHOR_REPORT_FILE text that `baseline --reanchor` prints on stdout (default: tests/fixtures/reanchor-report.txt)
+#   FAKE_REANCHOR_RC          exit code of `baseline --reanchor` (default 0); non-zero prints an engine reason on stderr
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 
 log=${FAKE_DOCKER_LOG:?}
+fixtures=${FAKE_FIXTURES:?}
 captured=$(dirname "$log")/baseline-captured
 
 record() { jq -cn "$@" >>"$log"; }
@@ -52,9 +57,13 @@ image=$1
 shift
 
 bundle=""
+reference=""
 for ((i = 0; i + 1 < ${#options[@]}; i++)); do
 	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/bundle ]]; then
 		bundle=${options[i + 1]%:/bundle}
+	fi
+	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/reference/.archfit-baseline.json:ro ]]; then
+		reference=${options[i + 1]%%:/reference/.archfit-baseline.json:ro}
 	fi
 done
 # visible NAME prints the host file the container sees at /bundle/NAME: a file mounted
@@ -75,9 +84,11 @@ for name in .archfit.yaml .archfit-baseline.json .archfit-labels.yaml; do
 		seen=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$seen")
 	fi
 done
-record --arg image "$image" --argjson bundle "$seen" \
+reference_digest=""
+[[ -z $reference ]] || reference_digest=$({ sha256sum "$reference" 2>/dev/null || shasum -a 256 "$reference"; } | cut -d' ' -f1)
+record --arg image "$image" --argjson bundle "$seen" --arg reference "$reference_digest" \
 	--argjson options "$(json_array "${options[@]}")" --argjson args "$(json_array "$@")" \
-	'{command: "run", image: $image, options: $options, args: $args, bundle: $bundle}'
+	'{command: "run", image: $image, options: $options, args: $args, bundle: $bundle, reference: $reference}'
 
 case ${1:-} in
 --version)
@@ -104,6 +115,21 @@ config)
 	cat "${FAKE_DRAFT:?}"
 	;;
 baseline)
+	if [[ " $* " == *" --reanchor "* ]]; then
+		# The engine reads the stored file from its read-only mount and writes the new one to /bundle.
+		if [[ -z $reference ]]; then
+			echo "error: stored baseline /reference/.archfit-baseline.json: no such file" >&2
+			exit 3
+		fi
+		if [[ ${FAKE_REANCHOR_RC:-0} != 0 ]]; then
+			echo 'error: schema version "archfit.baseline.v2" in /reference/.archfit-baseline.json cannot be re-anchored' >&2
+			exit "$FAKE_REANCHOR_RC"
+		fi
+		cp "${FAKE_REANCHOR_BASELINE:-$fixtures/reanchored-baseline.json}" "$bundle/.archfit-baseline.json"
+		: >"$captured"
+		cat "${FAKE_REANCHOR_REPORT_FILE:-$fixtures/reanchor-report.txt}"
+		exit 0
+	fi
 	if [[ -n ${FAKE_BASELINE:-} ]]; then
 		cp "$FAKE_BASELINE" "$bundle/.archfit-baseline.json"
 	else

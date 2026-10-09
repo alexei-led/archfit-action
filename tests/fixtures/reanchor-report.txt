@@ -1,0 +1,6 @@
+baseline saved: .archfit-baseline.json
+re-anchor: kept 0 accepted entries, dropped 1, left 0 current finding(s) unaccepted
+  drift: measurement_profile producer deploy-unit has incomplete evidence (partial) in head
+  drift: measurement_profile producer go/packages has incomplete evidence (partial) in head
+  dropped: no_direct_b_dependency stale0000000000
+  metric worsened: coverage 1 -> 0.5 (the new baseline records 0.5)

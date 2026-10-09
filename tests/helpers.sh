@@ -102,7 +102,7 @@ new_case() {
 	export GITHUB_WORKSPACE=$case_dir/workspace GITHUB_REPOSITORY=acme/shop
 	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=X64
 	export ARCHFIT_ENGINE_VERSION=v3.0.0 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
-	unset ARCHFIT_MODE ARCHFIT_DISCOVER ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
+	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
 		ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 }
 
@@ -121,9 +121,9 @@ on_push() { # SHA
 	export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_SHA=$1
 	event_file push '.after = $s' --arg s "$1"
 }
-on_dispatch() { # SHA DISCOVER
-	export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_SHA=$1 ARCHFIT_DISCOVER=$2
-	event_file workflow_dispatch '.inputs.discover = $d' --arg d "$2"
+on_dispatch() { # SHA
+	export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_SHA=$1
+	event_file workflow_dispatch '.'
 }
 on_unsupported() { # EVENT HEAD DEFAULT_BRANCH_TIP: an event the action must refuse
 	export GITHUB_EVENT_NAME=$1 GITHUB_REF=refs/heads/main GITHUB_SHA=$3

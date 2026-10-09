@@ -63,4 +63,13 @@ expect_eq "baseline_digest is the committed blob's" \
 	"$(blob_sha256 "$origin" "$head:.archfit-baseline.json")" "$(envelope_field baseline_digest)"
 expect "the envelope conforms to the App schema" "$validator" "$schema" "$(out envelope-file)=$(out payload-file)"
 
+new_case "reanchor: the pinned engine carries the committed baseline forward and it stays comparable"
+on_dispatch "$head"
+export ARCHFIT_MODE=reanchor
+run_action "$origin"
+expect_eq "the action succeeds: the self-check finds the re-anchored file comparable" 0 "$action_rc"
+expect_eq "baseline schema" archfit.baseline.v3 "$(jq -r .schema_version "$(out payload-file)")"
+expect "the engine's report names what it kept" grep -q '^re-anchor: kept' "$(out report-file)"
+expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
+
 finish

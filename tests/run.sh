@@ -106,9 +106,9 @@ set +e
 begin() { # NAME
 	stop_app
 	new_case "$1"
-	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log
+	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -239,7 +239,8 @@ expect_eq "the policy comes from the pushed commit" \
 	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
 
 begin "workflow_dispatch discovery: draft policy to /v1/discoveries"
-on_dispatch "$c2" true
+on_dispatch "$c2"
+export ARCHFIT_MODE=discovery
 start_app '[{"status": 200, "body": {"pull_request": 7, "url": "https://github.com/acme/shop/pull/7"}}]'
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
@@ -255,7 +256,7 @@ expect_eq "app-answer" '{"pull_request":7,"url":"https://github.com/acme/shop/pu
 expect_eq "artifact name" archfit-policy "$(out artifact-name)"
 
 begin "workflow_dispatch baseline: captured, self-checked, proposed through /v1/baselines"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app "[$proposed_answer]"
 run_action "$origin"
@@ -561,7 +562,7 @@ run_action "$no_policy"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "no engine run" 0 "$(engine_calls)"
 expect_eq "no upload" 0 "$(requests upload)"
-expect "the notice names discovery" log_has "discover: true"
+expect "the notice names discovery" log_has "mode: discovery"
 expect_eq "no payload" "" "$(out payload-file)"
 
 begin "engine exit 3: failure with the engine's reason, nothing sent"
@@ -666,29 +667,22 @@ expect "the error names the architecture" log_has "runner architecture 'X86'"
 expect_eq "no container ran" 0 "$(engine_calls)"
 
 begin "a dispatched report is refused before any work"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the recovery" log_has "dispatch with discover: true"
+expect "the error names the recovery" log_has "set mode: discovery"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
 begin "a dispatched baseline is allowed"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
 
-begin "discover: true conflicts with mode: baseline"
-on_dispatch "$c2" true
-export ARCHFIT_MODE=baseline
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the conflict" log_has "conflicts with discover: true"
-
 begin "discovery off the default branch is refused before any work"
 on_pull_request "$f1" "$c1"
-export ARCHFIT_DISCOVER=true
+export ARCHFIT_MODE=discovery
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error names the default branch" log_has "default branch (main) only"
@@ -747,7 +741,7 @@ expect_eq "no app-status" "" "$(out app-status)"
 expect "the notice says to commit the artifact" log_has "Commit the archfit-baseline artifact"
 
 begin "baseline equal to the protected one: unchanged, nothing written"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app '[{"status": 200, "body": {"unchanged": true}}]'
 run_action "$origin"
@@ -761,7 +755,7 @@ expect "no pull request is named" bash -c '! grep -q "pull request #" "$1"' _ "$
 
 for stale in stale_head stale_attempt; do
 	begin "baseline 409 $stale: not a success; dispatch the capture again"
-	on_dispatch "$c2" false
+	on_dispatch "$c2"
 	export ARCHFIT_MODE=baseline
 	start_app "[{\"status\": 409, \"body\": {\"error\": \"$stale\"}}]"
 	run_action "$origin"
@@ -776,7 +770,7 @@ for stale in stale_head stale_attempt; do
 done
 
 begin "baseline 503 with Retry-After: retried with a fresh token"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app '[{"status": 503, "headers": {"Retry-After": "3"}, "body": {"error": "unavailable"}}, '"$proposed_answer]"
 run_action "$origin"
@@ -790,7 +784,7 @@ expect_eq "app-status is the final answer" 200 "$(out app-status)"
 expect "the step summary names the pull request" summary_has "baseline pull request #12"
 
 begin "baseline over the App's 1 MiB cap: refused before sending"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app "[$proposed_answer]"
 export FAKE_BASELINE
@@ -803,7 +797,7 @@ expect "the error names the size and the cap" log_has "the baseline payload is 1
 expect_eq "the capture is still kept as an artifact" archfit-baseline "$(out artifact-name)"
 
 begin "baseline of exactly 1 MiB: sent"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app "[$proposed_answer]"
 export FAKE_BASELINE
@@ -813,7 +807,7 @@ expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "one upload of 1048576 bytes" "1 1048576" "$(requests upload) $(upload_field 0 .body_bytes)"
 
 begin "baseline 413 baseline_too_large from the App: final"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app '[{"status": 413, "body": {"error": "baseline_too_large"}}]'
 run_action "$origin"
@@ -831,7 +825,7 @@ for row in \
 	"400|baseline_invalid|archfit.baseline.v3 baseline"; do
 	IFS='|' read -r status code says <<<"$row"
 	begin "baseline $status $code: final, with the recovery"
-	on_dispatch "$c2" false
+	on_dispatch "$c2"
 	export ARCHFIT_MODE=baseline
 	start_app "[{\"status\": $status, \"body\": {\"error\": \"$code\"}}]"
 	run_action "$origin"
@@ -843,7 +837,7 @@ for row in \
 done
 
 begin "baseline answers are never echoed raw: no workflow command, no markdown"
-on_dispatch "$c2" false
+on_dispatch "$c2"
 export ARCHFIT_MODE=baseline
 start_app '[{"status": 200, "body": {"unchanged": "true\n::error::injected", "pull_request": "12\n::error::injected", "url": "[click](https://evil.example)"}}]'
 run_action "$origin"
@@ -859,5 +853,156 @@ export ARCHFIT_MODE=baseline FAKE_BASELINE_COMPARABLE=false
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error says why" log_has "not comparable in this image"
+
+# --- Re-anchor -----------------------------------------------------------------------
+# The protected baseline is a v3 file the engine accepted once; the engine's re-anchor
+# (fixtures/) carries its accepted debt to the new file and prints what it kept and dropped.
+
+reanchor_origin=$tmp/reanchor-origin
+git init --quiet -b main "$reanchor_origin"
+write_module "$reanchor_origin"
+cp "$root/tests/fixtures/stored-baseline.json" "$reanchor_origin/.archfit-baseline.json"
+printf 'labels: []\n' >"$reanchor_origin/.archfit-labels.yaml"
+commit_all "$reanchor_origin" "code, policy, the protected baseline and labels"
+ra=$(git -C "$reanchor_origin" rev-parse HEAD)
+stored_digest=$(blob_sha256 "$reanchor_origin" "$ra:.archfit-baseline.json")
+reanchored=$root/tests/fixtures/reanchored-baseline.json
+
+no_baseline=$tmp/no-baseline
+git init --quiet -b main "$no_baseline"
+write_module "$no_baseline"
+printf 'labels: []\n' >"$no_baseline/.archfit-labels.yaml"
+commit_all "$no_baseline" "code and policy, no baseline"
+nb=$(git -C "$no_baseline" rev-parse HEAD)
+
+begin "reanchor: engine re-anchors from the protected file, one upload to /v1/reanchors"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor
+start_app "[$proposed_answer]"
+run_action "$reanchor_origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+envelope=$(out envelope-file)
+expect "the envelope conforms to the App schema" valid_envelope "$envelope" "$(out payload-file)"
+cp "$envelope" "$tmp/reanchor.envelope"
+expect_eq "kind" reanchor "$(envelope_field kind)"
+expect_eq "route" /v1/reanchors "$(upload_field 0 .path)"
+expect_eq "one upload" 1 "$(requests upload)"
+expect_eq "the body is the new baseline file, byte for byte" "$(sha_of "$reanchored")" "$(upload_field 0 .body_sha256)"
+expect_eq "the payload is the new baseline file" "$(sha_of "$reanchored")" "$(sha_of "$(out payload-file)")"
+expect_eq "content type" application/json "$(upload_field 0 .content_type)"
+expect_eq "baseline_digest is the digest of the old protected blob" "$stored_digest" "$(envelope_field baseline_digest)"
+expect_eq "labels_digest is the labels blob's" "$(blob_sha256 "$reanchor_origin" "$ra:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
+expect_eq "pull request, base and merge base are empty off pull requests" "0||" \
+	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
+expect_eq "head_sha is the default-branch commit" "$ra" "$(envelope_field head_sha)"
+expect_eq "app-answer is the proposal" '{"pull_request":12,"url":"https://github.com/acme/shop/pull/12"}' "$(out app-answer)"
+expect_eq "the engine re-anchors from the mounted protected file" \
+	'["baseline","--reanchor","--from","/reference/.archfit-baseline.json","-c","/bundle/.archfit.yaml","--root","/src"]' \
+	"$(engine_call baseline | jq -c .args)"
+expect_eq "the protected file is mounted from the protected blob" "$stored_digest" "$(engine_call baseline | jq -r .reference)"
+expect "the protected file is mounted read-only, outside /bundle" json_ok \
+	'.options | any(. == "/reference/.archfit-baseline.json:/reference/.archfit-baseline.json:ro" or endswith(":/reference/.archfit-baseline.json:ro"))' \
+	"$(engine_call baseline)"
+expect "the engine reads no stored baseline from /bundle" json_ok \
+	'.bundle | keys == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
+expect "the self-check reads the new file, not the old one" json_ok \
+	".bundle[\".archfit-baseline.json\"] == \"$(sha_of "$reanchored")\"" "$(engine_call check)"
+expect "the engine's re-anchor report is the report file" cmp -s "$root/tests/fixtures/reanchor-report.txt" "$(out report-file)"
+expect "the report is in the log" log_has "re-anchor: kept 0 accepted entries, dropped 1"
+expect "the report is in the step summary" summary_has "dropped: no_direct_b_dependency stale0000000000"
+expect "the summary names the report" summary_has "Re-anchor report"
+
+begin "reanchor: the report is kept as an artifact even when the App refuses the upload"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor
+start_app '[{"status": 400, "body": {"error": "baseline_invalid"}}]'
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "the artifact is the baseline" archfit-baseline "$(out artifact-name)"
+expect "the report file exists" test -s "$(out report-file)"
+
+begin "reanchor without an endpoint: captured, self-checked, an artifact only"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor
+run_action "$reanchor_origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "no envelope: nothing is sent without an App" "" "$(out envelope-file)"
+expect_eq "no upload attempted" "" "$(out app-status)"
+expect "the notice says re-anchored" log_has "re-anchored and comparable"
+
+begin "reanchor with no protected baseline: refused before the engine runs"
+on_dispatch "$nb"
+export ARCHFIT_MODE=reanchor
+run_action "$no_baseline"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "no engine run" 0 "$(engine_calls)"
+expect "the error says there is no baseline" log_has "there is no baseline to re-anchor"
+expect "the error points to the first capture" log_has "mode: baseline"
+
+begin "reanchor off the default branch is refused before any work"
+on_pull_request "$ra" "$ra"
+export ARCHFIT_MODE=reanchor
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the default branch" log_has "default branch (main) only"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+
+begin "reanchor when the engine refuses the stored file (exit 3): failure with its reason, nothing sent"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor FAKE_REANCHOR_RC=3
+start_app "[$proposed_answer]"
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the engine's reason is in the log" log_has "cannot be re-anchored"
+expect_eq "no upload" 0 "$(requests upload)"
+expect_eq "no payload" "" "$(out payload-file)"
+
+begin "reanchor that this image finds non-comparable: failure"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor FAKE_BASELINE_COMPARABLE=false
+start_app "[$proposed_answer]"
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says why" log_has "not comparable in this image"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "reanchor 409 stale_head: not a success; dispatch the re-anchor again"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchor
+start_app '[{"status": 409, "body": {"error": "stale_head"}}]'
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says to dispatch the re-anchor again" log_has "Dispatch the re-anchor again"
+expect "the step summary says to dispatch again" summary_has "Dispatch the re-anchor again"
+
+for row in \
+	"403|reanchor_digest_mismatch|dispatch the re-anchor again" \
+	"403|reanchor_baseline_missing|mode: baseline" \
+	"400|reanchor_not_subset|dispatch the re-anchor again"; do
+	IFS='|' read -r status code says <<<"$row"
+	begin "reanchor $status $code: final, with the recovery"
+	on_dispatch "$ra"
+	export ARCHFIT_MODE=reanchor
+	start_app "[{\"status\": $status, \"body\": {\"error\": \"$code\"}}]"
+	run_action "$reanchor_origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect_eq "one upload" 1 "$(requests upload)"
+	expect "the error names the App's code" log_has "HTTP $status $code"
+	expect "the error gives the recovery" log_has "$says"
+done
+
+begin "reanchor: an unknown mode is refused with all four modes"
+on_dispatch "$ra"
+export ARCHFIT_MODE=reanchorr
+run_action "$reanchor_origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error lists the modes" log_has "mode must be report, discovery, baseline or reanchor"
+
+begin "the reanchor envelope with a missing or malformed baseline_digest is rejected"
+mutate reanchor-empty-baseline-digest '.baseline_digest = ""' "$tmp/reanchor.envelope"
+mutate reanchor-short-baseline-digest '.baseline_digest = ("5b" * 31)' "$tmp/reanchor.envelope"
+mutate reanchor-prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)' "$tmp/reanchor.envelope"
+mutate reanchor-with-pull-request '.pull_request = 42' "$tmp/reanchor.envelope"
+mutate reanchor-with-base-sha ".base_sha = \"$ra\"" "$tmp/reanchor.envelope"
 
 finish
