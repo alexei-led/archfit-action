@@ -38,8 +38,8 @@ jobs:
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v2.3.1"
-          image-digest: "sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793"
+          engine-version: "v3.0.0"
+          image-digest: "sha256:0eab810538fd8e75115f548154edecfe294ee70e1f13e1a158008ded43119909"
           discover: ${{ inputs.discover }}
 ```
 
@@ -96,7 +96,7 @@ the App's graph view reads), `archfit-policy` or `archfit-baseline`.
 | --- | --- | --- |
 | `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries` or `/v1/baselines`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v2.3.1`. An image that reports another version is refused. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v3.0.0`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
 | `mode` | *(empty)* | `report`, `discovery` or `baseline`. Empty means `report`, or `discovery` when `discover` is true. |
 | `discover` | `false` | `true` selects discovery. The generated workflow passes its dispatch input here. |
@@ -251,7 +251,7 @@ platform must equal the runner's (`X64` → `linux/amd64`, `ARM64` →
 ## Development
 
 ```sh
-curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
+curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/bbd658f008bcc4bc83e063cf305d20dc4508da2e/internal/extract/golang/testdata/single-module/baseline.json
 ARCHFIT_TEST_STATE=/tmp/state.json bash tests/run.sh   # needs git, jq, curl, python3, go
 bash tests/engine-smoke.sh                             # needs docker and network
 shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker

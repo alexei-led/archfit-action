@@ -15,7 +15,7 @@ mode=${ARCHFIT_MODE:-}
 discover=${ARCHFIT_DISCOVER:-}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
-	die "engine-version '$engine_version' is not a version such as v2.3.1"
+	die "engine-version '$engine_version' is not a version such as v3.0.0"
 [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
 	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused"
 # The endpoint doubles as the OIDC audience, which the App compares byte for byte with

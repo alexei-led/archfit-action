@@ -5,8 +5,8 @@
 # shellcheck disable=SC2016,SC2034,SC2154
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# ghcr.io/alexei-led/archfit v2.3.1, linux/amd64 manifest (index sha256:6bd35b7b…0351).
-readonly ENGINE_DIGEST=sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793
+# ghcr.io/alexei-led/archfit v3.0.0, linux/amd64 manifest (index sha256:fa113d91…3baf).
+readonly ENGINE_DIGEST=sha256:0eab810538fd8e75115f548154edecfe294ee70e1f13e1a158008ded43119909
 passes=0 failures=0
 
 pass() {
@@ -101,7 +101,7 @@ new_case() {
 	: >"$GITHUB_STEP_SUMMARY"
 	export GITHUB_WORKSPACE=$case_dir/workspace GITHUB_REPOSITORY=acme/shop
 	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=X64
-	export ARCHFIT_ENGINE_VERSION=v2.3.1 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
+	export ARCHFIT_ENGINE_VERSION=v3.0.0 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
 	unset ARCHFIT_MODE ARCHFIT_DISCOVER ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
 		ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 }

@@ -7,7 +7,7 @@
 #   FAKE_DOCKER_LOG           JSON lines, one per call (required)
 #   FAKE_STATE                document that `check` prints
 #   FAKE_DRAFT                document that `config init` prints
-#   FAKE_ENGINE_VERSION       version that `--version` reports (default v2.3.1)
+#   FAKE_ENGINE_VERSION       version that `--version` reports (default v3.0.0)
 #   FAKE_PLATFORM             os/arch that `image inspect` reports (default linux/amd64)
 #   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
 #                             and 3 prints no report, as the engine does
@@ -81,7 +81,7 @@ record --arg image "$image" --argjson bundle "$seen" \
 
 case ${1:-} in
 --version)
-	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v2.3.1}"
+	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v3.0.0}"
 	;;
 check)
 	if ! jq -e 'has(".archfit.yaml")' <<<"$seen" >/dev/null; then
@@ -107,7 +107,7 @@ baseline)
 	if [[ -n ${FAKE_BASELINE:-} ]]; then
 		cp "$FAKE_BASELINE" "$bundle/.archfit-baseline.json"
 	else
-		printf '{"schema_version":"archfit.baseline.v2","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
+		printf '{"schema_version":"archfit.baseline.v3","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
 	fi
 	: >"$captured"
 	echo "baseline saved: /bundle/.archfit-baseline.json"

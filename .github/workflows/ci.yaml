@@ -31,19 +31,19 @@ jobs:
         with:
           go-version-file: tests/validate/go.mod
           cache: false
-      - name: Fetch a real engine state document (archfit v2.3.1, pinned by commit and sha256)
+      - name: Fetch a real engine state document (archfit v3.0.0, pinned by commit and sha256)
         run: |
           # A document the engine emitted, never a stub written to match this action.
           curl -fsSL -o "$RUNNER_TEMP/state.json" \
-            https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
-          echo "5e21abbed182589685c88cbc8fa06a763982ca95bf47511c064611e0c0a11cb8  $RUNNER_TEMP/state.json" | sha256sum --check
+            https://raw.githubusercontent.com/alexei-led/archfit/bbd658f008bcc4bc83e063cf305d20dc4508da2e/internal/extract/golang/testdata/single-module/baseline.json
+          echo "dc621672167ae9fec8158984b718fed2b94e264c652cf5b6b33d21edacdabceb  $RUNNER_TEMP/state.json" | sha256sum --check
       - name: Envelopes for pull_request, push, discovery and baseline; refused events; transport; edge cases
         run: bash tests/run.sh
         env:
           ARCHFIT_TEST_STATE: ${{ runner.temp }}/state.json
 
   engine:
-    name: Pinned engine image (v2.3.1, linux/amd64)
+    name: Pinned engine image (v3.0.0, linux/amd64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,8 +66,8 @@ jobs:
       - id: archfit
         uses: ./
         with:
-          engine-version: v2.3.1
-          image-digest: sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793
+          engine-version: v3.0.0
+          image-digest: sha256:0eab810538fd8e75115f548154edecfe294ee70e1f13e1a158008ded43119909
       - name: Nothing was measured or sent
         env:
           VERDICT: ${{ steps.archfit.outputs.verdict }}

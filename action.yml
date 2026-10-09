@@ -24,7 +24,7 @@ inputs:
     required: false
     default: ""
   engine-version:
-    description: Engine release of the image, for example v2.3.1. The action refuses an image that reports another version.
+    description: Engine release of the image, for example v3.0.0. The action refuses an image that reports another version.
     required: true
   image-digest:
     description: >-

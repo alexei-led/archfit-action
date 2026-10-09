@@ -204,7 +204,7 @@ hint() {
 		fi
 		;;
 	discovery_invalid) echo "The App refused the engine's draft policy." ;;
-	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v2 baseline." ;;
+	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v3 baseline." ;;
 	unknown_engine_identity) echo "Pin the engine-version and image-digest the App's manifest lists for this runner, as the generated workflow does." ;;
 	policy_missing) echo "The default branch has no .archfit.yaml; merge a policy before capturing a baseline." ;;
 	policy_mismatch | labels_mismatch)
