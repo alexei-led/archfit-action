@@ -122,7 +122,7 @@ baseline)
 			exit 3
 		fi
 		if [[ ${FAKE_REANCHOR_RC:-0} != 0 ]]; then
-			echo 'error: schema version "archfit.baseline.v2" in /reference/.archfit-baseline.json cannot be re-anchored' >&2
+			echo 'error: schema version "archfit.baseline.v1" in /reference/.archfit-baseline.json cannot be re-anchored' >&2
 			exit "$FAKE_REANCHOR_RC"
 		fi
 		cp "${FAKE_REANCHOR_BASELINE:-$fixtures/reanchored-baseline.json}" "$bundle/.archfit-baseline.json"

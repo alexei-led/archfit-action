@@ -14,7 +14,11 @@ endpoint=${ARCHFIT_ENDPOINT:-}
 mode=${ARCHFIT_MODE:-}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
-	die "engine-version '$engine_version' is not a version such as v3.0.0"
+	die "engine-version '$engine_version' is not a version such as $SUPPORTED_ENGINE_VERSION"
+# This action runs one engine: the App's manifest, the envelope schema and the baseline
+# format are v3's. An older image is refused here, not adapted.
+[[ $engine_version == "$SUPPORTED_ENGINE_VERSION" ]] ||
+	die "engine-version '$engine_version' is not supported: this action runs engine $SUPPORTED_ENGINE_VERSION only; pin $SUPPORTED_ENGINE_VERSION and its digest"
 [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
 	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused"
 # The endpoint doubles as the OIDC audience, which the App compares byte for byte with

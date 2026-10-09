@@ -169,10 +169,16 @@ engine() {
 # workflow commands are suspended while it is printed.
 show_engine_log() {
 	[[ -s $engine_log ]] || return 0
+	print_fenced "archfit engine log" "$engine_log"
+}
+
+# print_fenced TITLE FILE prints FILE in a group with workflow commands suspended, so the
+# text cannot start a command of its own. The text is repository-controlled.
+print_fenced() {
 	local fence
 	fence=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-	printf '::group::archfit engine log\n::stop-commands::%s\n' "$fence"
-	cat "$engine_log"
+	printf '::group::%s\n::stop-commands::%s\n' "$1" "$fence"
+	cat "$2"
 	printf '\n::%s::\n::endgroup::\n' "$fence"
 }
 
@@ -230,8 +236,9 @@ check() {
 }
 
 # capture_baseline WHAT [ENGINE FLAGS...] runs `archfit baseline` and keeps the file it
-# writes as the payload. Stdout (the re-anchor report, repository-controlled text) and
-# stderr go to separate files.
+# writes as the payload. Stdout (the engine's own messages, such as the temporary-waiver
+# disclosure, and in a re-anchor the report) goes to a file that is printed in the log;
+# stderr goes to the engine log.
 capture_baseline() {
 	local what=$1 captured=$bundle/.archfit-baseline.json
 	shift
@@ -239,6 +246,9 @@ capture_baseline() {
 	engine baseline "$@" -c /bundle/.archfit.yaml --root /src >"$out/engine.out" 2>"$engine_log" ||
 		engine_failed "archfit could not $what"
 	show_engine_log
+	if [[ -s $out/engine.out ]]; then
+		print_fenced "archfit engine output" "$out/engine.out"
+	fi
 	[[ -f $captured && ! -L $captured ]] || die "archfit wrote no baseline file"
 	payload=$out/.archfit-baseline.json
 	cp "$captured" "$payload"
@@ -255,20 +265,15 @@ self_check_baseline() {
 		die "the captured baseline is not comparable in this image ($status): $(jq -r '(.gate_reference.reasons // []) | join("; ")' "$out/archfit-state.json")"
 }
 
-# show_reanchor_report prints the engine's report in the log and in the step summary, and
-# keeps it as a file for the artifact. The text names rules, modules and paths of the
-# repository, so it is fenced: workflow commands are suspended in the log, and the
-# markdown fence is longer than any backtick run in the text. The summary is capped; the
-# artifact holds the full report.
+# show_reanchor_report keeps the engine's report as a file for the artifact and puts it in
+# the step summary. The log already has it (capture_baseline). The text names rules,
+# modules and paths of the repository, so the markdown fence is longer than any backtick
+# run in the text. The summary is capped; the artifact holds the full report.
 readonly SUMMARY_REPORT_MAX_BYTES=524288
 show_reanchor_report() {
-	local fence ticks='```' text=$out/engine.out
+	local ticks='```' text=$out/engine.out
 	report_file=$out/reanchor-report.txt
 	cp "$text" "$report_file"
-	fence=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-	printf '::group::archfit re-anchor report\n::stop-commands::%s\n' "$fence"
-	cat "$text"
-	printf '\n::%s::\n::endgroup::\n' "$fence"
 	while grep -qF -- "$ticks" "$text"; do ticks+='`'; done
 	summary "#### Re-anchor report" "" "$ticks"
 	head -c "$SUMMARY_REPORT_MAX_BYTES" "$text" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"

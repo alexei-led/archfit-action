@@ -9,7 +9,8 @@ is no migration path.
 
 - Pin `engine-version: v3.0.0` and the v3.0.0 per-platform `image-digest` from the
   App's manifest. The action refuses any other engine version and any tag.
-- The baseline is `archfit.baseline.v3`. A v2 file is refused by the engine.
+- The baseline is `archfit.baseline.v3`. A v2 file is accepted only as the input of a
+  re-anchor; `check` refuses it.
 - `mode` takes `report`, `discovery`, `baseline` or `reanchor`.
 - The envelope schema is the App's revision with `kind: reanchor`.
 

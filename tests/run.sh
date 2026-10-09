@@ -609,6 +609,15 @@ run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "verdict" needs_attention "$(out verdict)"
 
+begin "an engine version other than v3.0.0 is refused before the checkout"
+on_push "$c2"
+export ARCHFIT_ENGINE_VERSION=v2.3.1
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the one supported engine" log_has "this action runs engine v3.0.0 only"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+expect_eq "no container ran" 0 "$(engine_calls)"
+
 begin "an image tag is refused before any work"
 on_push "$c2"
 export ARCHFIT_IMAGE_DIGEST=v3.0.0
@@ -739,6 +748,7 @@ expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
 expect_eq "no envelope: nothing is sent without an App" "" "$(out envelope-file)"
 expect_eq "no app-status" "" "$(out app-status)"
 expect "the notice says to commit the artifact" log_has "Commit the archfit-baseline artifact"
+expect "the engine's own output reaches the log, not only its stderr" log_has "baseline saved: /bundle/.archfit-baseline.json"
 
 begin "baseline equal to the protected one: unchanged, nothing written"
 on_dispatch "$c2"
@@ -920,6 +930,8 @@ run_action "$reanchor_origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect_eq "the artifact is the baseline" archfit-baseline "$(out artifact-name)"
 expect "the report file exists" test -s "$(out report-file)"
+expect "action.yml uploads the report file with the baseline (the upload step does not run here)" \
+	grep -qF 'steps.run.outputs.report-file' "$root/action.yml"
 
 begin "reanchor without an endpoint: captured, self-checked, an artifact only"
 on_dispatch "$ra"
