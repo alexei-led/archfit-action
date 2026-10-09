@@ -15,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require jq curl
 
 # App limits: the upload body cap (wire/report MaxBytes), the discovery draft cap
-# (control/onboarding), the baseline file cap (wire/policy MaxBaselineBytes), and the
+# (control/onboarding), the baseline file cap (wire/policy MaxBaselineBytes; a re-anchor uploads one too), and the
 # raw envelope cap (wire/envelope).
 readonly REPORT_MAX_BYTES=5242880
 readonly DISCOVERY_MAX_BYTES=1048576
@@ -39,8 +39,10 @@ payload=$(fact payload_file)
 fork=$(fact fork)
 
 # Without an App the capture stays an artifact: nobody would open its pull request.
-if [[ $mode == baseline && -z $endpoint ]]; then
-	notice "baseline captured and comparable in this image. Commit the archfit-baseline artifact as .archfit-baseline.json in a pull request that a policy owner approves."
+if [[ $mode == baseline || $mode == reanchor ]] && [[ -z $endpoint ]]; then
+	done_what="captured"
+	[[ $mode == baseline ]] || done_what="re-anchored"
+	notice "baseline $done_what and comparable in this image. Commit the archfit-baseline artifact as .archfit-baseline.json in a pull request that a policy owner approves."
 	summary "Baseline: the \`archfit-baseline\` artifact holds \`.archfit-baseline.json\`. Commit it in a pull request that a policy owner approves."
 	exit 0
 fi
@@ -90,6 +92,7 @@ case $kind in
 report) route=/v1/reports content_type=application/json cap=$REPORT_MAX_BYTES ;;
 discovery) route=/v1/discoveries content_type=application/yaml cap=$DISCOVERY_MAX_BYTES ;;
 baseline) route=/v1/baselines content_type=application/json cap=$BASELINE_MAX_BYTES ;;
+reanchor) route=/v1/reanchors content_type=application/json cap=$BASELINE_MAX_BYTES ;;
 *) die "unknown upload kind '$kind'" ;;
 esac
 size=$(wc -c <"$payload" | tr -d ' ')
@@ -204,7 +207,10 @@ hint() {
 		fi
 		;;
 	discovery_invalid) echo "The App refused the engine's draft policy." ;;
-	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v2 baseline." ;;
+	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v3 baseline." ;;
+	reanchor_baseline_missing) echo "The default branch has no .archfit-baseline.json to re-anchor; capture the first baseline with mode: baseline." ;;
+	reanchor_digest_mismatch) echo "The baseline this run re-anchored is not the one on the default-branch head; dispatch the re-anchor again." ;;
+	reanchor_not_subset) echo "The re-anchored file accepts debt the protected baseline did not accept; dispatch the re-anchor again with this action's pinned commit." ;;
 	unknown_engine_identity) echo "Pin the engine-version and image-digest the App's manifest lists for this runner, as the generated workflow does." ;;
 	policy_missing) echo "The default branch has no .archfit.yaml; merge a policy before capturing a baseline." ;;
 	policy_mismatch | labels_mismatch)
@@ -238,7 +244,7 @@ case $status in
 		result="policy $(proposal)"
 		next="Review and merge it to adopt the policy."
 		;;
-	baseline)
+	baseline | reanchor)
 		# Only the JSON literal true; anything else is read as a proposal and shape-checked.
 		if [[ -n $answer_json ]] && jq -e '.unchanged == true' <<<"$answer_json" >/dev/null; then
 			result="unchanged: the capture equals the baseline on the default branch"
@@ -254,10 +260,12 @@ case $status in
 	;;
 409)
 	# A superseded report or draft is replaced by the newer run's own upload. A superseded
-	# baseline is not: nothing proposes it until someone dispatches the capture again.
-	if [[ $kind == baseline ]]; then
-		summary "- App: refused the baseline (409${code:+ $code}): no pull request was opened. Dispatch the baseline capture again."
-		die "the App answered 409 ${code:-conflict}: the default branch moved on or a newer run attempt exists, so no baseline pull request was opened. Dispatch the baseline capture again on the current default-branch head."
+	# baseline or re-anchor is not: nothing proposes it until someone dispatches it again.
+	if [[ $kind == baseline || $kind == reanchor ]]; then
+		again="the baseline capture"
+		[[ $kind == baseline ]] || again="the re-anchor"
+		summary "- App: refused the $kind (409${code:+ $code}): no pull request was opened. Dispatch $again again."
+		die "the App answered 409 ${code:-conflict}: the default branch moved on or a newer run attempt exists, so no baseline pull request was opened. Dispatch $again again on the current default-branch head."
 	fi
 	notice "the App answered 409 ${code:-conflict}: a newer commit or run attempt supersedes this upload, and nothing was published for it"
 	;;

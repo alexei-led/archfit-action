@@ -21,10 +21,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      discover:
-        description: Propose a policy for review instead of reporting state
-        type: boolean
-        default: false
+      mode:
+        description: discovery (propose a policy), baseline (capture accepted debt) or reanchor (carry the baseline to this engine)
+        type: choice
+        options: [discovery, baseline, reanchor]
+        default: discovery
 
 permissions:
   contents: read
@@ -38,9 +39,9 @@ jobs:
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v2.3.1"
-          image-digest: "sha256:7d4f73248865e11bbfe244cd477bd0ea8e8cbdc0b7fb2baade8e044b618b2793"
-          discover: ${{ inputs.discover }}
+          engine-version: "v3.0.0"
+          image-digest: "sha256:0eab810538fd8e75115f548154edecfe294ee70e1f13e1a158008ded43119909"
+          mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
 ```
 
 Do not add a checkout step: the action does its own, without persisted
@@ -67,15 +68,28 @@ the App accepts none of these events.
 | Mode | Engine command | Payload | Sent to |
 | --- | --- | --- | --- |
 | `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src` | state report | `<endpoint>/v1/reports` |
-| `discovery` (`discover: true`) | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
+| `discovery` | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
 | `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
+| `reanchor` | `baseline --reanchor --from /reference/.archfit-baseline.json -c /bundle/.archfit.yaml --root /src`, then `check` | the new `.archfit-baseline.json` | `<endpoint>/v1/reanchors`; artifact only without `endpoint` |
 
-Discovery and baseline run on the default branch only. Reports come from
-`pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode is
-refused before any work, because the App accepts a dispatched run only as
-discovery or baseline. Baseline mode fails unless the engine finds the captured
-baseline comparable in the same image. A baseline captured on a laptop is not
-comparable: the measurement profile records the platform and the tool versions.
+Discovery, baseline and reanchor run on the default branch only. Reports come
+from `pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode
+is refused before any work, because the App accepts a dispatched run only as
+discovery, baseline or reanchor. Baseline and reanchor mode fail unless the
+engine finds the captured baseline comparable in the same image. A baseline
+captured on a laptop is not comparable: the measurement profile records the
+platform and the tool versions.
+
+`reanchor` carries the accepted debt of the protected baseline to this engine.
+It needs a `.archfit-baseline.json` on the default branch; without one the job
+fails before the engine runs, and the first baseline is a `baseline` capture.
+The engine keeps a finding only when the stored file accepted it, so the new
+file accepts no new debt. The engine's report is printed in the log, written to
+the step summary and kept in the `archfit-baseline` artifact next to the file. It
+lists each kept, dropped and unaccepted finding, each seam that changed, and each
+metric that got worse. Review it before you merge the baseline pull request. The
+App gets only the file: it computes the same differences from the two files
+itself.
 
 With `endpoint`, baseline mode sends the captured file to the App, which opens
 or updates a draft pull request from `archfit/baseline` that changes only
@@ -88,18 +102,18 @@ default-branch head; the App refuses a capture of an older head. See
 policy owner approves.
 
 Each mode uploads its payload as a workflow artifact: `archfit-report` (the name
-the App's graph view reads), `archfit-policy` or `archfit-baseline`.
+the App's graph view reads), `archfit-policy`, or `archfit-baseline` for both
+baseline and reanchor (a reanchor also keeps the engine's report there).
 
 ## Inputs
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries` or `/v1/baselines`. Empty means analyze only. |
+| `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v2.3.1`. An image that reports another version is refused. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v3.0.0`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
-| `mode` | *(empty)* | `report`, `discovery` or `baseline`. Empty means `report`, or `discovery` when `discover` is true. |
-| `discover` | `false` | `true` selects discovery. The generated workflow passes its dispatch input here. |
+| `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
 
 ## Outputs
 
@@ -107,6 +121,7 @@ the App's graph view reads), `archfit-policy` or `archfit-baseline`.
 | --- | --- |
 | `verdict` | `healthy`, `needs_attention` or `blocked`; empty when nothing was measured. |
 | `payload-file` | The report, draft policy or baseline the engine produced. |
+| `report-file` | The engine's re-anchor report; empty unless `mode` is `reanchor`. |
 | `envelope-file` | The envelope, exactly as sent in the `X-Archfit-Envelope` header. |
 | `app-status` | HTTP status of the App's final answer; `000` when no answer arrived; empty when nothing was sent. |
 | `app-answer` | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`, `{"pull_request":12,"url":"…"}`, `{"unchanged":true}` or `{"error":"<code>"}`. |
@@ -143,9 +158,9 @@ The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 16 flat
 typed keys. [`schema/`](schema/) holds the vendored copy, and
 [`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
 sha256. CI validates the envelopes the action builds for `pull_request` and
-`push` reports, `workflow_dispatch` discovery, and `workflow_dispatch` and
-`push` baselines against it. Checking that the vendored
-bytes still equal the App's schema belongs in the App's CI.
+`push` reports and for the discovery, baseline and reanchor envelopes against it.
+Checking that the vendored bytes still equal the App's schema belongs in the App's
+CI.
 
 The envelope states what was analysed: repository, event, pull request, head,
 base and merge base, run, engine identity, and the digests of the payload and of
@@ -170,8 +185,8 @@ One `POST` per attempt: `Authorization: Bearer <OIDC token>`, the envelope in
   value, an HTTP date included, falls back to 5 s doubling with ±20% jitter.
   Each attempt mints a fresh OIDC token.
 - 409 on a report or a draft policy means a newer commit or run attempt
-  supersedes the upload: a notice, not a failure. 409 on a baseline fails the
-  job (see below). Every other answer is final; the error names the App's code
+  supersedes the upload: a notice, not a failure. 409 on a baseline or a
+  re-anchor fails the job (see below). Every other answer is final; the error names the App's code
   and the fix.
 - The App's answer reaches the log and the step summary only when each field has
   its documented shape: a lowercase code, a number, the JSON literal `true` or a
@@ -189,12 +204,17 @@ reads no stored baseline), and the digest of the labels file the capture read
 as `labels_digest` (empty without one). The captured file stays a workflow
 artifact too.
 
+A re-anchor upload is `POST <endpoint>/v1/reanchors`, with the same body rules
+and `kind: reanchor`. Its `baseline_digest` is required: the SHA-256 of the
+protected `.archfit-baseline.json` the engine read, the blob at `head_sha`.
+The App reads that blob itself and requires equality.
+
 | Answer | Job | Meaning |
 | --- | --- | --- |
 | 200 `{"pull_request": n, "url": "…"}` | passes | The App opened or updated the baseline pull request. An architecture owner approves its exact head commit and merges it. |
 | 200 `{"unchanged": true}` | passes | The capture equals the baseline on the default branch. Nothing was written. |
-| 409 `stale_head`, `stale_attempt` | fails | The default branch moved on, or a newer run attempt exists. No pull request was opened: dispatch the capture again. |
-| 400, 401, 403, 413 | fails | Final. The error names the code and the fix, for example `policy_mismatch` or `labels_mismatch` (dispatch again on the current head), `unknown_engine_identity` (pin the manifest's image) or `baseline_too_large`. |
+| 409 `stale_head`, `stale_attempt` | fails | The default branch moved on, or a newer run attempt exists. No pull request was opened: dispatch the capture or the re-anchor again. |
+| 400, 401, 403, 413 | fails | Final. The error names the code and the fix, for example `policy_mismatch` or `labels_mismatch` (dispatch again on the current head), `unknown_engine_identity` (pin the manifest's image), `baseline_too_large`, or `reanchor_digest_mismatch`, `reanchor_baseline_missing` and `reanchor_not_subset` for a re-anchor. |
 | 429, 5xx, no answer | retried | As for every upload. |
 
 ## Edge cases
@@ -203,9 +223,11 @@ artifact too.
   keeps the report as an artifact, sends nothing, and exits 0. The App marks the
   pull request `fork_unsupported`.
 - **No policy** on the protected ref: nothing is measured or sent. Dispatch the
-  workflow with `discover: true` on the default branch.
-- **Engine exit 3** (no report): the job fails with the engine's last lines and
-  sends nothing.
+  workflow with `mode: discovery` on the default branch.
+- **Engine exit 3** (no report, or a stored baseline the engine cannot
+  re-anchor): the job fails with the engine's last lines and sends nothing. A
+  re-anchor exits 3 when the stored file is missing or older than schema v2, or
+  when the flags conflict.
 
 ## The container
 
@@ -216,8 +238,11 @@ The engine runs as `docker run ghcr.io/alexei-led/archfit@<digest>` with:
 - the checkout at `/src`, with its `.git` read-only;
 - each trusted input mounted read-only at `/bundle/<name>`, over an empty
   writable `/bundle` directory. The engine keeps its fact cache
-  (`.archfit-cache/`) there, next to the config, and baseline mode writes
-  `.archfit-baseline.json` there.
+  (`.archfit-cache/`) there, next to the config, and baseline and reanchor mode
+  write `.archfit-baseline.json` there;
+- in reanchor mode only, the protected baseline mounted read-only at
+  `/reference/.archfit-baseline.json`. It is outside `/bundle`, so the engine
+  cannot read its output as its input.
 
 The action refuses a checkout that keeps credentials anywhere the container
 could read them: auth headers, credential helpers, `url.*.insteadOf` rewrites,
@@ -251,7 +276,7 @@ platform must equal the runner's (`X64` → `linux/amd64`, `ARM64` →
 ## Development
 
 ```sh
-curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/f8877d25ba36d84d3780071580d23486e3d794d0/internal/extract/golang/testdata/single-module/baseline.json
+curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/bbd658f008bcc4bc83e063cf305d20dc4508da2e/internal/extract/golang/testdata/single-module/baseline.json
 ARCHFIT_TEST_STATE=/tmp/state.json bash tests/run.sh   # needs git, jq, curl, python3, go
 bash tests/engine-smoke.sh                             # needs docker and network
 shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker

@@ -2,7 +2,7 @@
 # End-to-end check against the real pinned engine image; needs docker and network.
 #
 # Drives the action's steps (prepare, checkout, run, report) on a scratch Go repository
-# with ghcr.io/alexei-led/archfit v2.3.1 for linux/amd64, the image the App's manifest
+# with ghcr.io/alexei-led/archfit v3.0.0 for linux/amd64, the image the App's manifest
 # names. It proves the identity the action derives, that the engine reads exactly the
 # bundle bytes the envelope digests, that git history works through the read-only .git
 # mount, and that a baseline the action captures is comparable for the next report run.
@@ -33,7 +33,7 @@ run_action "$origin"
 payload=$(out payload-file)
 expect_eq "a blocked verdict fails an analysis-only job" 1 "$action_rc"
 expect_eq "verdict" blocked "$(out verdict)"
-expect_eq "engine_version is what the image reports" v2.3.1 "$(fact engine_version)"
+expect_eq "engine_version is what the image reports" v3.0.0 "$(fact engine_version)"
 expect_eq "platform is the image's" linux/amd64 "$(fact platform)"
 expect_eq "config_hash is the digest of the policy blob the action materialized" \
 	"$(blob_sha256 "$origin" "$head:.archfit.yaml")" "$(jq -r .comparison.config_hash "$payload")"
@@ -48,7 +48,7 @@ on_push "$head"
 export ARCHFIT_MODE=baseline
 run_action "$origin"
 expect_eq "the capture succeeds" 0 "$action_rc"
-expect_eq "baseline schema" archfit.baseline.v2 "$(jq -r .schema_version "$(out payload-file)")"
+expect_eq "baseline schema" archfit.baseline.v3 "$(jq -r .schema_version "$(out payload-file)")"
 cp "$(out payload-file)" "$tmp/captured.json"
 
 new_case "report with the committed baseline: accepted debt no longer blocks"
@@ -62,5 +62,14 @@ expect_eq "gate_reference" comparable "$(jq -r .gate_reference.status "$(out pay
 expect_eq "baseline_digest is the committed blob's" \
 	"$(blob_sha256 "$origin" "$head:.archfit-baseline.json")" "$(envelope_field baseline_digest)"
 expect "the envelope conforms to the App schema" "$validator" "$schema" "$(out envelope-file)=$(out payload-file)"
+
+new_case "reanchor: the pinned engine carries the committed baseline forward and it stays comparable"
+on_dispatch "$head"
+export ARCHFIT_MODE=reanchor
+run_action "$origin"
+expect_eq "the action succeeds: the self-check finds the re-anchored file comparable" 0 "$action_rc"
+expect_eq "baseline schema" archfit.baseline.v3 "$(jq -r .schema_version "$(out payload-file)")"
+expect "the engine's report names what it kept" grep -q '^re-anchor: kept' "$(out report-file)"
+expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
 
 finish

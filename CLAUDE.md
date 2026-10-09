@@ -28,13 +28,16 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   with `tests/fakes/docker` (engine shim), `tests/fakes/app.py` (App + OIDC token server),
   `tests/events/` (event payloads), `tests/validate/` (Go envelope validator, pinned by go.sum)
 - `tests/engine-smoke.sh` — the real pinned image (CI only; needs docker)
+- `tests/fixtures/` — a re-anchor report and baselines the v3.0.0 engine produced (the
+  docker shim replays them); `stored-baseline.json` is the protected file a re-anchor reads
 
 ## Invariants
 
 - **The App owns the envelope** (`archfit-app` decisions.md §3; `internal/wire/envelope`).
   This repo vendors `schema/envelope.v1.schema.json` byte for byte and conforms. Change
   it only by re-vendoring a new App revision: update `SCHEMA_SOURCE` and its sha256 in
-  the same commit. An additive App change ships in the App first.
+  the same commit. An additive App change ships in the App first. No compatibility is
+  kept with older App schemas or engine versions: the Action supports engine v3.0.0 only.
 - **The envelope states what was analysed; it proves nothing.** Every field is
   self-reported. The identity fields (`engine_version`, `image_digest`, `platform`) and
   the input digests are claims the App compares with its manifest and the protected
@@ -58,13 +61,15 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   the container has run.
 - **Inputs are read-only, the rest is writable on purpose.** Each trusted input is
   mounted `:ro` over `/bundle/<name>`; `/bundle` itself is an empty writable directory
-  for the fact cache and a captured baseline. The working tree is writable: `uv run`
+  for the fact cache and a captured baseline. A re-anchor mounts the protected baseline
+  `:ro` at `/reference/.archfit-baseline.json`, outside `/bundle`, so the engine's output
+  is never its input. The working tree is writable: `uv run`
   writes `.venv` and `uv.lock`. Payloads are read from stdout into `RUNNER_TEMP`,
   outside every mount. No `--base`: it needs a writable `.git`.
 - **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
   every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
   in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the
-  App's `eligible()` table); dispatch runs discovery or baseline.
+  App's `eligible()` table); dispatch runs discovery, baseline or reanchor.
 - **The endpoint is https and exact.** No trailing slash (it is also the OIDC audience);
   plain http only for 127.0.0.1/localhost. App answer fields are printed only when they
   match their documented shape.
@@ -73,9 +78,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
 - **Nested actions are pinned by full commit SHA**, with the tag in a comment. The App
   pins this action by commit; a tag inside it would make that commit's behaviour mutable.
 - **Retries only on 429, 5xx and no answer.** 409 on a report or draft is superseded
-  (exit 0): the newer run uploads its own. 409 on a baseline (`stale_head`,
-  `stale_attempt`) fails the job with "dispatch the capture again": nothing re-proposes
-  it. Every other answer is final. `Retry-After` counts only as 1-4 decimal digits;
+  (exit 0): the newer run uploads its own. 409 on a baseline or re-anchor (`stale_head`,
+  `stale_attempt`) fails the job with "dispatch again": nothing re-proposes it. Every other answer is final. `Retry-After` counts only as 1-4 decimal digits;
   else backoff.
 - **A baseline is proposed, never committed.** With an endpoint, baseline mode posts the
   captured `.archfit-baseline.json` bytes (at most 1 MiB, `application/json`) to
@@ -86,8 +90,18 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   the self-check copy is never materialized into `inputs.tsv`), `labels_digest` = the
   labels blob the capture read, or "". Without an endpoint the capture is an artifact
   only and no envelope is written. `unchanged` counts only as the JSON literal `true`.
+- **A re-anchor is proposed the same way, to `/v1/reanchors`.** Envelope: `kind: reanchor`,
+  the baseline rules above, but `baseline_digest` is required: the SHA-256 of the
+  protected `.archfit-baseline.json` blob at `head_sha`, the file the engine read. The
+  body is the new file only; the engine's report stays in the step summary and the
+  artifact, never sent. The App computes kept, dropped and metric changes itself from
+  the two files. The engine's report text is printed under `stop-commands` and fenced
+  in the summary. The job refuses a stored file the engine cannot re-anchor (exit 3)
+  or one that is not on the default branch, before any upload.
 - **Fork pull requests cannot hold `id-token: write`.** They are analysed and kept as
   an artifact, never uploaded. Do not add a fallback that makes them look enforceable.
+- **One engine.** The Action runs engine v3.0.0 only. Older engines, schemas and
+  envelope shapes are refused, not adapted (no users yet; see the v2.0.0 release notes).
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.
   Never suggest `:latest` or a tag. The image platform must equal the runner's
   (`RUNNER_ARCH`); `engine_version` must equal the input. Both are checked before analysis.

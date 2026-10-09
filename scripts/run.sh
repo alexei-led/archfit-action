@@ -16,7 +16,9 @@
 #
 # Container. The checkout is mounted at /src with .git read-only; each trusted input is
 # mounted read-only over /bundle/<name>; /bundle itself is an empty writable directory
-# for the engine's fact cache and a captured baseline. HOME=/tmp, and nothing else: no
+# for the engine's fact cache and a captured baseline. A re-anchor also reads the
+# protected baseline, mounted read-only at /reference/.archfit-baseline.json: not under
+# /bundle, where the engine writes the new one. HOME=/tmp, and nothing else: no
 # token, no OIDC variable, no credential. The working tree stays writable because
 # analyzers write there (`uv run` creates .venv and uv.lock in a Python project). .git
 # is read-only so code that runs during analysis cannot plant git config or hooks for
@@ -37,16 +39,17 @@ src=${GITHUB_WORKSPACE:?}
 event=${GITHUB_EVENT_NAME:?}
 endpoint=${ARCHFIT_ENDPOINT:-}
 work=$(work_dir)
-inputs=$work/inputs # the materialized trusted inputs, mounted read-only one by one
-bundle=$work/bundle # the engine's writable config directory
+inputs=$work/inputs       # the materialized trusted inputs, mounted read-only one by one
+reference=$work/reference # the protected baseline a re-anchor reads, mounted read-only
+bundle=$work/bundle       # the engine's writable config directory
 out=$work/out
 engine_log=$out/engine.log
 image=$ENGINE_IMAGE_REPO@$image_digest
-mkdir -p "$inputs" "$bundle" "$out"
+mkdir -p "$inputs" "$reference" "$bundle" "$out"
 : >"$work/inputs.tsv"
 
 head="" base_sha="" merge_base="" pull_request=0 fork=false input_tip=""
-engine_version="" platform="" verdict="" payload="" kind="" artifact=""
+engine_version="" platform="" verdict="" payload="" kind="" artifact="" report_file=""
 
 resolve_revisions() {
 	local base_ref head_repo checked_out
@@ -109,11 +112,11 @@ assert_no_credentials() {
 	return 0
 }
 
-# materialize PATH writes the trusted copy of PATH into the inputs directory and records
-# where it came from (base or head on a pull request, else ref). A PATH absent at the
-# chosen commit leaves no file and an empty digest.
+# materialize PATH [DIR] writes the trusted copy of PATH into DIR (the inputs directory
+# by default) and records where it came from (base or head on a pull request, else ref).
+# A PATH absent at the chosen commit leaves no file and an empty digest.
 materialize() {
-	local path=$1 rev=$input_tip from=ref rc=0 entry fmode ftype oid digest=""
+	local path=$1 dir=${2:-$inputs} rev=$input_tip from=ref rc=0 entry fmode ftype oid digest=""
 	if [[ $event == pull_request ]]; then
 		from=base
 		# Head bytes only for an upload, where the App checks owner approval of the head.
@@ -126,14 +129,14 @@ materialize() {
 			esac
 		fi
 	fi
-	rm -f "$inputs/$path"
+	rm -f "$dir/$path"
 	entry=$(git -C "$src" ls-tree "$rev" -- "$path") || die "git ls-tree failed for $path at $rev"
 	if [[ -n $entry ]]; then
 		read -r fmode ftype oid <<<"${entry%%$'\t'*}"
 		[[ $ftype == blob && ($fmode == 100644 || $fmode == 100755) ]] ||
 			die "$path at $rev is not a regular file (git mode $fmode)"
-		git -C "$src" cat-file blob "$oid" >"$inputs/$path" || die "cannot read $path at $rev"
-		digest=$(sha256_hex "$inputs/$path")
+		git -C "$src" cat-file blob "$oid" >"$dir/$path" || die "cannot read $path at $rev"
+		digest=$(sha256_hex "$dir/$path")
 	fi
 	printf '%s\t%s\t%s\t%s\n' "$path" "$from" "$rev" "$digest" >>"$work/inputs.tsv"
 }
@@ -148,6 +151,8 @@ engine() {
 	for name in "${TRUSTED_INPUTS[@]}"; do
 		[[ ! -f $inputs/$name ]] || mounts+=(--volume "$inputs/$name:/bundle/$name:ro")
 	done
+	[[ ! -f $reference/.archfit-baseline.json ]] ||
+		mounts+=(--volume "$reference/.archfit-baseline.json:/reference/.archfit-baseline.json:ro")
 	docker run --rm --pull never \
 		--user "$(id -u):$(id -g)" \
 		--cap-drop ALL --security-opt no-new-privileges \
@@ -164,10 +169,16 @@ engine() {
 # workflow commands are suspended while it is printed.
 show_engine_log() {
 	[[ -s $engine_log ]] || return 0
+	print_fenced "archfit engine log" "$engine_log"
+}
+
+# print_fenced TITLE FILE prints FILE in a group with workflow commands suspended, so the
+# text cannot start a command of its own. The text is repository-controlled.
+print_fenced() {
 	local fence
 	fence=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-	printf '::group::archfit engine log\n::stop-commands::%s\n' "$fence"
-	cat "$engine_log"
+	printf '::group::%s\n::stop-commands::%s\n' "$1" "$fence"
+	cat "$2"
 	printf '\n::%s::\n::endgroup::\n' "$fence"
 }
 
@@ -224,6 +235,54 @@ check() {
 	[[ $rc == "$expected" ]] || die "archfit exited $rc, but its report says $verdict"
 }
 
+# capture_baseline WHAT [ENGINE FLAGS...] runs `archfit baseline` and keeps the file it
+# writes as the payload. Stdout (the engine's own messages, such as the temporary-waiver
+# disclosure, and in a re-anchor the report) goes to a file that is printed in the log;
+# stderr goes to the engine log.
+capture_baseline() {
+	local what=$1 captured=$bundle/.archfit-baseline.json
+	shift
+	rm -f "$captured"
+	engine baseline "$@" -c /bundle/.archfit.yaml --root /src >"$out/engine.out" 2>"$engine_log" ||
+		engine_failed "archfit could not $what"
+	show_engine_log
+	if [[ -s $out/engine.out ]]; then
+		print_fenced "archfit engine output" "$out/engine.out"
+	fi
+	[[ -f $captured && ! -L $captured ]] || die "archfit wrote no baseline file"
+	payload=$out/.archfit-baseline.json
+	cp "$captured" "$payload"
+}
+
+# self_check_baseline: the capture is only useful when this image finds it comparable.
+# Unaccepted findings may block (exit 1); only the reference status decides here.
+self_check_baseline() {
+	local status
+	cp "$payload" "$inputs/.archfit-baseline.json"
+	check "$out/archfit-state.json"
+	status=$(jq -r '.gate_reference.status // ""' "$out/archfit-state.json")
+	[[ $status == comparable ]] ||
+		die "the captured baseline is not comparable in this image ($status): $(jq -r '(.gate_reference.reasons // []) | join("; ")' "$out/archfit-state.json")"
+}
+
+# show_reanchor_report keeps the engine's report as a file for the artifact and puts it in
+# the step summary. The log already has it (capture_baseline). The text names rules,
+# modules and paths of the repository, so the markdown fence is longer than any backtick
+# run in the text. The summary is capped; the artifact holds the full report.
+readonly SUMMARY_REPORT_MAX_BYTES=524288
+show_reanchor_report() {
+	local ticks='```' text=$out/engine.out
+	report_file=$out/reanchor-report.txt
+	cp "$text" "$report_file"
+	while grep -qF -- "$ticks" "$text"; do ticks+='`'; done
+	summary "#### Re-anchor report" "" "$ticks"
+	head -c "$SUMMARY_REPORT_MAX_BYTES" "$text" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+	summary "" "$ticks"
+	if (($(wc -c <"$text") > SUMMARY_REPORT_MAX_BYTES)); then
+		summary "The report is longer than the summary shows; the archfit-baseline artifact holds all of it." ""
+	fi
+}
+
 write_facts() {
 	jq -n \
 		--arg mode "$mode" --arg kind "$kind" --arg event "$event" \
@@ -246,6 +305,7 @@ write_facts() {
 	set_output facts-file "$work/facts.json"
 	set_output payload-file "$payload"
 	set_output artifact-name "$artifact"
+	set_output report-file "$report_file"
 	set_output verdict "$verdict"
 }
 
@@ -280,7 +340,7 @@ report)
 		die "this pull request deletes .archfit.yaml. Without an App endpoint no policy owner approves that, so the job fails; keep the policy, or report to the App so an owner can approve the deletion."
 	fi
 	if [[ ! -f $inputs/.archfit.yaml ]]; then
-		notice "no .archfit.yaml at $(source_of .archfit.yaml); there is no policy to measure against. Dispatch this workflow with discover: true on the default branch to propose one."
+		notice "no .archfit.yaml at $(source_of .archfit.yaml); there is no policy to measure against. Dispatch this workflow with mode: discovery on the default branch to propose one."
 		write_facts
 		exit 0
 	fi
@@ -305,22 +365,28 @@ baseline)
 	materialize .archfit-labels.yaml
 	[[ -f $inputs/.archfit.yaml ]] || die "no .archfit.yaml at $(source_of .archfit.yaml); a baseline needs a policy"
 	engine_identity
-	engine baseline -c /bundle/.archfit.yaml --root /src >"$engine_log" 2>&1 ||
-		engine_failed "archfit could not capture a baseline"
-	show_engine_log
-	captured=$bundle/.archfit-baseline.json
-	[[ -f $captured && ! -L $captured ]] || die "archfit wrote no baseline file"
-	payload=$out/.archfit-baseline.json
-	cp "$captured" "$payload"
-	# The capture is only useful when this image finds it comparable. The self-check
-	# reads the copy, mounted read-only like every other input. It is not materialized,
-	# so the envelope's baseline_digest stays empty: the capture read no stored baseline.
-	cp "$payload" "$inputs/.archfit-baseline.json"
-	check "$out/archfit-state.json"
-	status=$(jq -r '.gate_reference.status // ""' "$out/archfit-state.json")
-	[[ $status == comparable ]] ||
-		die "the captured baseline is not comparable in this image ($status): $(jq -r '(.gate_reference.reasons // []) | join("; ")' "$out/archfit-state.json")"
+	capture_baseline "capture a baseline"
+	# The self-check reads the copy, mounted read-only like every other input. It is not
+	# materialized, so the envelope's baseline_digest stays empty: the capture read no
+	# stored baseline.
+	self_check_baseline
 	kind=baseline artifact=archfit-baseline
+	;;
+reanchor)
+	# The protected baseline is the one input a re-anchor reads besides policy and labels.
+	# Its digest is the envelope's baseline_digest: the App compares it with the protected
+	# blob and checks the new file against it. It is materialized outside the bundle.
+	materialize .archfit.yaml
+	materialize .archfit-labels.yaml
+	materialize .archfit-baseline.json "$reference"
+	[[ -f $inputs/.archfit.yaml ]] || die "no .archfit.yaml at $(source_of .archfit.yaml); a re-anchor needs a policy"
+	[[ -f $reference/.archfit-baseline.json ]] ||
+		die "no .archfit-baseline.json at $(source_of .archfit-baseline.json); there is no baseline to re-anchor. Run mode: baseline for the first capture."
+	engine_identity
+	capture_baseline "re-anchor the baseline" --reanchor --from /reference/.archfit-baseline.json
+	show_reanchor_report
+	self_check_baseline
+	kind=reanchor artifact=archfit-baseline
 	;;
 esac
 

@@ -11,10 +11,11 @@ inputs:
     description: >-
       archfit App base URL over https, without a trailing slash, for example
       https://archfit.example. Reports go to <endpoint>/v1/reports, discovery
-      drafts to <endpoint>/v1/discoveries and captured baselines to
-      <endpoint>/v1/baselines. Empty means analyze only: nothing is sent, pull
-      requests are measured against the base branch's policy, baseline and labels,
-      a blocked verdict fails the job, and a captured baseline is an artifact only.
+      drafts to <endpoint>/v1/discoveries, captured baselines to
+      <endpoint>/v1/baselines and re-anchored baselines to <endpoint>/v1/reanchors.
+      Empty means analyze only: nothing is sent, pull requests are measured against
+      the base branch's policy, baseline and labels, a blocked verdict fails the
+      job, and a captured or re-anchored baseline is an artifact only.
     required: false
     default: ""
   audience:
@@ -24,7 +25,7 @@ inputs:
     required: false
     default: ""
   engine-version:
-    description: Engine release of the image, for example v2.3.1. The action refuses an image that reports another version.
+    description: Engine release of the image, for example v3.0.0. The action refuses an image that reports another version.
     required: true
   image-digest:
     description: >-
@@ -33,24 +34,24 @@ inputs:
     required: true
   mode:
     description: >-
-      report (measure and upload the state), discovery (propose a first policy) or
-      baseline (capture accepted debt; with an endpoint the App proposes it in a pull
-      request, else it is an artifact only). Empty means report, or
-      discovery when `discover` is true. Discovery and baseline run on the default branch only.
+      report (measure and upload the state), discovery (propose a first policy),
+      baseline (capture accepted debt) or reanchor (carry the baseline on the default
+      branch to this engine and accept nothing new). With an endpoint the App proposes a
+      baseline or re-anchor in a pull request, else it is an artifact only. Empty means
+      report. Discovery, baseline and reanchor run on the default branch only.
     required: false
     default: ""
-  discover:
-    description: "`true` selects discovery mode. The generated workflow passes its boolean dispatch input here."
-    required: false
-    default: "false"
 
 outputs:
   verdict:
     description: Engine verdict (healthy, needs_attention or blocked); empty when nothing was measured.
     value: ${{ steps.run.outputs.verdict }}
   payload-file:
-    description: The state report, discovery draft or baseline the engine produced; empty when nothing was measured.
+    description: The state report, discovery draft, or baseline or re-anchored baseline the engine produced; empty when nothing was measured.
     value: ${{ steps.run.outputs.payload-file }}
+  report-file:
+    description: The engine's re-anchor report (what it kept, dropped and left unaccepted); empty unless mode is reanchor.
+    value: ${{ steps.run.outputs.report-file }}
   envelope-file:
     description: The archfit.report-envelope.v1 line, exactly as sent in the X-Archfit-Envelope header; empty when none was written.
     value: ${{ steps.report.outputs.envelope-file }}
@@ -61,7 +62,7 @@ outputs:
     description: >-
       The App's JSON answer on one line, for example {"conclusion":"success","reason":"healthy"}
       for a report, {"pull_request":12,"url":"https://github.com/o/r/pull/12"} or
-      {"unchanged":true} for a baseline, and {"error":"<code>"} for a refusal.
+      {"unchanged":true} for a baseline or re-anchor, and {"error":"<code>"} for a refusal.
     value: ${{ steps.report.outputs.app-answer }}
 
 runs:
@@ -74,7 +75,6 @@ runs:
         ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
         ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
         ARCHFIT_MODE: ${{ inputs.mode }}
-        ARCHFIT_DISCOVER: ${{ inputs.discover }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
     # Full history for the merge base and the engine's history evidence; no credential
@@ -100,7 +100,9 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.run.outputs.artifact-name }}
-        path: ${{ steps.run.outputs.payload-file }}
+        path: |
+          ${{ steps.run.outputs.payload-file }}
+          ${{ steps.run.outputs.report-file }}
         if-no-files-found: error
         include-hidden-files: true
         overwrite: true
