@@ -1,4 +1,4 @@
 repository: github.com/alexei-led/archfit-app
-revision: unreleased (archfit-app feat/engine-v3; set to the merge commit once it lands)
+revision: pending. Vendored ahead of archfit-app PR 2 (feat/engine-v3), which pins this repository's merge commit and carries the same bytes; the agreed merge order puts the App after this change.
 path: internal/wire/envelope/envelope.v1.schema.json
 sha256: 4dd29f60f0c6c21b79cfb583bae7679401dc2ec5680a0604715684a2cbe9fffe
