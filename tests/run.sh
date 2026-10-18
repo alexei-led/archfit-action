@@ -108,7 +108,8 @@ begin() { # NAME
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
+		FAKE_BASE_RC FAKE_BASE_SYMLINK
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -223,8 +224,19 @@ expect "/bundle itself is a separate, empty writable directory" json_ok \
 expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
-expect "engine arguments" json_ok \
-	'.args == ["check", "--json", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src"]' "$check_call"
+expect "engine arguments: the check compares with the merge base" json_ok \
+	'.args == ["check", "--json", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
+	"$check_call" --arg m "$c1"
+expect_eq "one engine pass reports both sides" 1 "$(jq -s 'map(select(.command == "run" and .args[0] == "check")) | length' "$FAKE_DOCKER_LOG")"
+expect "the payload carries the origin of every finding" \
+	jq -e '.comparison.origin_status == "comparable" and (.comparison.introduced_finding_ids | length) == 1
+	  and all(.findings[]; .origin == "introduced" or .origin == "pre_existing")' "$payload"
+expect "only .git/worktrees is writable inside .git, from an empty RUNNER_TEMP directory" json_ok \
+	'[.[] | select(contains(":/src/.git"))] == [$s + "/.git:/src/.git:ro", $w + ":/src/.git/worktrees"]' \
+	"$options" --arg s "$GITHUB_WORKSPACE" --arg w "$RUNNER_TEMP/archfit/git-worktrees"
+expect "nothing of the base worktree is left in the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
+expect "the host .git/worktrees is an empty mountpoint" test -z "$(ls -A "$GITHUB_WORKSPACE/.git/worktrees")"
+expect "the step summary gives the origin counts" summary_has "Origin against the merge base: comparable, introduced 1, resolved 0"
 
 begin "push report: trusted inputs from the pushed commit"
 on_push "$c2"
@@ -237,6 +249,10 @@ expect_eq "pull_request, base and merge base are empty off pull requests" "0||" 
 expect_eq "head_sha is the pushed commit" "$c2" "$(envelope_field head_sha)"
 expect_eq "the policy comes from the pushed commit" \
 	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect "no base comparison off pull requests" json_ok \
+	'(.args | index("--base")) == null and ([.options[] | select(contains("worktrees"))] == [])' "$(engine_call check)"
+expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
+expect "the step summary has no origin line" test -z "$(grep -F 'Origin against' "$GITHUB_STEP_SUMMARY")"
 
 begin "workflow_dispatch discovery: draft policy to /v1/discoveries"
 on_dispatch "$c2"
@@ -361,6 +377,52 @@ run_action "$cross"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error explains the merge bases" log_has "more than one merge base"
 expect_eq "no engine run" 0 "$(engine_calls)"
+
+# --- Origin against the merge base: report-only, never a reason to fail -------------
+
+check_calls() { jq -cs 'map(select(.command == "run" and .args[0] == "check"))' "$FAKE_DOCKER_LOG"; }
+
+for base_rc in 3 137; do
+	begin "pull request whose base comparison exits $base_rc: reported again without origin"
+	on_pull_request "$f1" "$c1"
+	export FAKE_BASE_RC=$base_rc
+	start_app "[$ok_answer]"
+	run_action "$origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	calls=$(check_calls)
+	expect "the check ran with --base, then again without it" json_ok \
+		'length == 2 and (.[0].args | index("--base")) != null and (.[1].args | index("--base")) == null
+		 and ([.[1].options[] | select(contains("worktrees"))] == [])' "$calls"
+	expect "the log says origin is missing for this run" log_has "origin is missing for this run"
+	expect "the log shows the engine's reason" log_has "git worktree add exited 128"
+	expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
+	expect "the step summary says origin is missing" summary_has "Origin against the merge base: missing"
+	expect "the left-over worktree is removed from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
+	expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+	expect_eq "the report is uploaded" 1 "$(requests upload)"
+done
+
+begin "pull request whose engine fails with and without --base: failure, nothing sent"
+on_pull_request "$f1" "$c1"
+export FAKE_CHECK_RC=3
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "the check ran twice" 2 "$(check_calls | jq length)"
+expect "the error is the engine's" log_has "archfit exited 3: no report was produced"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "base comparison that links .archfit-cache out of the checkout: the link is not followed"
+on_pull_request "$f1" "$c1"
+outside=$case_dir/outside
+mkdir -p "$outside/worktrees"
+: >"$outside/worktrees/keep"
+export FAKE_BASE_SYMLINK=$outside
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "nothing behind the link is deleted" test -f "$outside/worktrees/keep"
+expect "the log says the directory was left" log_has "it is not a plain directory, so it is not removed"
 
 # --- The validator itself: it must reject what the App's decoder rejects --------------
 

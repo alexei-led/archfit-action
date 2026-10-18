@@ -8,11 +8,11 @@ Three repositories, one product. The boundary is deliberate: a **tenant-bearing
 service** versus an **analyzer the customer executes**, with a narrow protocol
 between them.
 
-| Repo | Owns |
-| --- | --- |
-| [`archfit`](https://github.com/alexei-led/archfit) | engine, CLI, images, the state report contract (Apache-2.0) |
-| `archfit-action` (this one) | the execution and upload adapter (Apache-2.0) |
-| `archfit-app` | tenancy, approved policy, baselines, PR feedback, **the envelope contract** (private) |
+| Repo                                               | Owns                                                                                  |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [`archfit`](https://github.com/alexei-led/archfit) | engine, CLI, images, the state report contract (Apache-2.0)                           |
+| `archfit-action` (this one)                        | the execution and upload adapter (Apache-2.0)                                         |
+| `archfit-app`                                      | tenancy, approved policy, baselines, PR feedback, **the envelope contract** (private) |
 
 The design plan lives in `archfit-app` under `docs/plans/`.
 
@@ -54,7 +54,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   commit. Digests are taken before the container starts. Never read them from the
   working tree (eol rules change the bytes).
 - **The container gets nothing secret.** No `--env-file`, no bare `-e NAME` (it copies
-  the host value), no `ACTIONS_*`, no token. `.git` is mounted read-only; refuse a
+  the host value), no `ACTIONS_*`, no token. `.git` is mounted read-only (but see
+  origin below for `.git/worktrees`); refuse a
   checkout with credential keys (`extraheader`, `credential.*`, `url.*.insteadOf`,
   `includeIf.*`) or a userinfo remote URL in `.git/config` or `.git/modules/*/config`.
   The OIDC token is minted after the container exits. Run no git on the runner after
@@ -65,7 +66,16 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   `:ro` at `/reference/.archfit-baseline.json`, outside `/bundle`, so the engine's output
   is never its input. The working tree is writable: `uv run`
   writes `.venv` and `uv.lock`. Payloads are read from stdout into `RUNNER_TEMP`,
-  outside every mount. No `--base`: it needs a writable `.git`.
+  outside every mount.
+- **Origin is report-only, and its one git write is fenced.** A pull request report runs
+  `check --base <merge_base>`; push, dispatch and the baseline self-checks do not. For
+  that run only, an empty `RUNNER_TEMP` directory is mounted writable over
+  `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
+  the host directory is a mountpoint created beforehand). After the container exits,
+  `.archfit-cache/worktrees` is deleted from the checkout, never through a symlink. A
+  `--base` run without a verdict (exit 3 or a crash) is rerun without `--base` and
+  warns that origin is missing; it never fails the job by itself. No watchdog: the
+  job's `timeout-minutes` bounds a hang. The envelope does not carry origin.
 - **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
   every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
   in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the

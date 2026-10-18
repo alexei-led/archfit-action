@@ -16,6 +16,8 @@ die() {
 
 notice() { printf '::notice::%s\n' "$(escape "$*")"; }
 
+warning() { printf '::warning::%s\n' "$(escape "$*")"; }
+
 # escape encodes a workflow-command message on one line, so text that came from
 # the engine, the repository or the App cannot start a command of its own.
 escape() {

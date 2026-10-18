@@ -17,6 +17,14 @@
 #   FAKE_REANCHOR_BASELINE    file that `baseline --reanchor` writes (default: tests/fixtures/reanchored-baseline.json)
 #   FAKE_REANCHOR_REPORT_FILE text that `baseline --reanchor` prints on stdout (default: tests/fixtures/reanchor-report.txt)
 #   FAKE_REANCHOR_RC          exit code of `baseline --reanchor` (default 0); non-zero prints an engine reason on stderr
+#   FAKE_BASE_RC              exit code of `check --base` (default: as without --base); a failure leaves a
+#                             worktree in the checkout, as a killed engine does
+#   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
+#
+# `check --base` needs what docker and git need for `git worktree add` under a read-only
+# .git: the host mountpoint .git/worktrees (else docker fails, 125) and a writable mount
+# over /src/.git/worktrees (else git fails, 3). It prints the state with the origin
+# fields the engine adds, and leaves the per-commit lock file the engine leaves.
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 
@@ -58,9 +66,17 @@ shift
 
 bundle=""
 reference=""
+src=""
+git_worktrees=""
 for ((i = 0; i + 1 < ${#options[@]}; i++)); do
 	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/bundle ]]; then
 		bundle=${options[i + 1]%:/bundle}
+	fi
+	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/src ]]; then
+		src=${options[i + 1]%:/src}
+	fi
+	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/src/.git/worktrees ]]; then
+		git_worktrees=${options[i + 1]%:/src/.git/worktrees}
 	fi
 	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/reference/.archfit-baseline.json:ro ]]; then
 		reference=${options[i + 1]%%:/reference/.archfit-baseline.json:ro}
@@ -104,7 +120,33 @@ check)
 		exit 3
 	fi
 	echo "fake engine: check /src" >&2
-	if [[ -f $captured && ${FAKE_BASELINE_COMPARABLE:-true} == true ]]; then
+	if [[ " $* " == *" --base "* ]]; then
+		base=" $* "
+		base=${base##* --base }
+		base=${base%% *}
+		if [[ ! -d $src/.git/worktrees ]]; then
+			echo "docker: Error response from daemon: mkdir $src/.git/worktrees: read-only file system" >&2
+			exit 125
+		fi
+		if [[ -z $git_worktrees || ! -d $git_worktrees ]]; then
+			echo "error: cannot create worktree for ref \"$base\": git worktree add: fatal: could not create directory of '.git/worktrees/wt': Read-only file system" >&2
+			exit 3
+		fi
+		cache=$src/.archfit-cache
+		if [[ -n ${FAKE_BASE_SYMLINK:-} ]]; then
+			ln -s "$FAKE_BASE_SYMLINK" "$cache"
+		fi
+		mkdir -p "$cache/worktrees/$base/wt" "$git_worktrees/wt"
+		: >"$cache/worktrees/$base.lock"
+		if [[ -n ${FAKE_BASE_RC:-} ]]; then
+			printf 'gitdir: /src/.git/worktrees/wt\n' >"$cache/worktrees/$base/wt/.git"
+			echo "error: cannot create worktree for ref \"$base\": git worktree add exited 128" >&2
+			exit "$FAKE_BASE_RC"
+		fi
+		rm -rf "${cache:?}/worktrees/$base" "$git_worktrees/wt"
+		jq '.comparison += {origin_status: "comparable", introduced_finding_ids: [.findings[0].id], resolved_finding_ids: []}
+			| .findings |= (to_entries | map(.value + {origin: (if .key == 0 then "introduced" else "pre_existing" end)}))' "${FAKE_STATE:?}"
+	elif [[ -f $captured && ${FAKE_BASELINE_COMPARABLE:-true} == true ]]; then
 		jq '.gate_reference = {status: "comparable", base_ref: "baseline", reasons: []}' "${FAKE_STATE:?}"
 	else
 		cat "${FAKE_STATE:?}"

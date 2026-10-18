@@ -24,6 +24,17 @@
 # is read-only so code that runs during analysis cannot plant git config or hooks for
 # git on the runner to execute later. Reports are read from the engine's stdout into
 # RUNNER_TEMP, outside every mount.
+#
+# Origin. On a pull request the check also runs with --base <merge base>: the engine
+# checks that commit out in a temporary worktree and marks every finding introduced,
+# pre_existing or unknown (comparison.origin_status, introduced_finding_ids). That is
+# report-only: the verdict and exit code are the head's alone. `git worktree add`
+# writes .git/worktrees/<name>, so for that run one empty RUNNER_TEMP directory is
+# mounted writable over /src/.git/worktrees; the rest of .git stays read-only, and
+# host git never reads that directory. The worktree itself goes under
+# /src/.archfit-cache/worktrees, which the action deletes after the container exits.
+# A --base run that does not end in a verdict is run again without --base: the
+# report then has no origin, and the log says so.
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -39,9 +50,10 @@ src=${GITHUB_WORKSPACE:?}
 event=${GITHUB_EVENT_NAME:?}
 endpoint=${ARCHFIT_ENDPOINT:-}
 work=$(work_dir)
-inputs=$work/inputs       # the materialized trusted inputs, mounted read-only one by one
-reference=$work/reference # the protected baseline a re-anchor reads, mounted read-only
-bundle=$work/bundle       # the engine's writable config directory
+inputs=$work/inputs               # the materialized trusted inputs, mounted read-only one by one
+reference=$work/reference         # the protected baseline a re-anchor reads, mounted read-only
+bundle=$work/bundle               # the engine's writable config directory
+git_worktrees=$work/git-worktrees # .git/worktrees for a --base run, never read on the host
 out=$work/out
 engine_log=$out/engine.log
 image=$ENGINE_IMAGE_REPO@$image_digest
@@ -49,7 +61,7 @@ mkdir -p "$inputs" "$reference" "$bundle" "$out"
 : >"$work/inputs.tsv"
 
 head="" base_sha="" merge_base="" pull_request=0 fork=false input_tip=""
-engine_version="" platform="" verdict="" payload="" kind="" artifact="" report_file=""
+engine_version="" platform="" verdict="" payload="" kind="" artifact="" report_file="" origin=""
 
 resolve_revisions() {
 	local base_ref head_repo checked_out
@@ -153,6 +165,12 @@ engine() {
 	done
 	[[ ! -f $reference/.archfit-baseline.json ]] ||
 		mounts+=(--volume "$reference/.archfit-baseline.json:/reference/.archfit-baseline.json:ro")
+	# --base runs `git worktree add`, the one git write the engine makes. The host
+	# directory is only a mountpoint: docker cannot create it inside the read-only .git.
+	if [[ " $* " == *" --base "* ]]; then
+		mkdir -p "$src/.git/worktrees" "$git_worktrees"
+		mounts+=(--volume "$git_worktrees:/src/.git/worktrees")
+	fi
 	docker run --rm --pull never \
 		--user "$(id -u):$(id -g)" \
 		--cap-drop ALL --security-opt no-new-privileges \
@@ -163,6 +181,22 @@ engine() {
 		${mounts[@]+"${mounts[@]}"} \
 		--workdir /src \
 		"$image" "$@"
+}
+
+# remove_base_worktrees deletes what a --base run leaves in the checkout. The engine
+# removes its worktree on every path it returns from, but keeps a lock file per base
+# commit, and a killed run keeps the whole tree, whose .git file names a path only the
+# container has. The container wrote this directory, so a symlink is refused, never
+# followed: it could point anywhere on the runner.
+remove_base_worktrees() {
+	local cache=$src/.archfit-cache
+	[[ -e $cache/worktrees || -L $cache/worktrees || -L $cache ]] || return 0
+	if [[ -L $cache || ! -d $cache || -L $cache/worktrees || ! -d $cache/worktrees ]]; then
+		warning "left ${cache#"$src/"}/worktrees in the checkout: it is not a plain directory, so it is not removed"
+		return 0
+	fi
+	rm -rf -- "$cache/worktrees"
+	rmdir -- "$cache" 2>/dev/null || true
 }
 
 # show_engine_log prints the engine's stderr. The text is repository-controlled, so
@@ -211,11 +245,34 @@ engine_identity() {
 		die "image $image_digest is engine $engine_version, not $pinned_version; pin the digest of the engine version you name"
 }
 
-# check STATE runs `archfit check` into STATE. The exit code is the verdict
+# check STATE [BASE] runs `archfit check` into STATE. The exit code is the verdict
 # (0 healthy, 1 blocked, 2 needs_attention); 3 means no report was produced.
+# With BASE the engine also marks each finding's origin against that commit. A run
+# with BASE that ends without a verdict (a git error is exit 3, a crash anything else)
+# does not fail the job: the check runs again without BASE and has no origin.
 check() {
-	local state=$1 rc=0 schema expected
-	engine check --json --progress=none -c /bundle/.archfit.yaml --root /src >"$state" 2>"$engine_log" || rc=$?
+	local state=$1 base=${2:-} rc=0 schema expected
+	local args=(check --json --progress=none -c /bundle/.archfit.yaml --root /src)
+	if [[ -n $base ]]; then
+		engine "${args[@]}" --base "$base" >"$state" 2>"$engine_log" || rc=$?
+		remove_base_worktrees
+		case $rc in
+		0 | 1 | 2)
+			origin=$(jq -r '.comparison | "\(.origin_status), introduced \(.introduced_finding_ids | length), resolved \(.resolved_finding_ids | length)"' "$state" 2>/dev/null) ||
+				origin=""
+			[[ $origin =~ ^[a-z_]+,\ introduced\ [0-9]+,\ resolved\ [0-9]+$ ]] || origin=""
+			;;
+		*)
+			show_engine_log
+			warning "the comparison with the merge base $base ended without a report (archfit exit $rc); origin is missing for this run. Running the check again without --base."
+			origin="missing (the comparison with the merge base failed; see the log)"
+			rc=0
+			engine "${args[@]}" >"$state" 2>"$engine_log" || rc=$?
+			;;
+		esac
+	else
+		engine "${args[@]}" >"$state" 2>"$engine_log" || rc=$?
+	fi
 	case $rc in
 	0 | 1 | 2) ;;
 	3) engine_failed "archfit exited 3: no report was produced (a configuration, usage or tool error)" ;;
@@ -316,7 +373,9 @@ write_summary() {
 	summary "### archfit $mode" "" \
 		"- Analysed: $analysed" \
 		"- Engine: $engine_version, $platform, \`$image_digest\`" \
-		"- Verdict: ${verdict:-none}" ""
+		"- Verdict: ${verdict:-none}"
+	[[ -z $origin ]] || summary "- Origin against the merge base: $origin"
+	summary ""
 	[[ -s $work/inputs.tsv ]] || return 0
 	summary "| Trusted input | From | Commit | SHA-256 |" "| --- | --- | --- | --- |"
 	local path from rev digest
@@ -346,7 +405,8 @@ report)
 	fi
 	engine_identity
 	payload=$out/archfit-state.json
-	check "$payload"
+	# merge_base is empty off pull requests, so push runs measure the commit alone.
+	check "$payload" "$merge_base"
 	kind=report artifact=archfit-report
 	;;
 discovery)

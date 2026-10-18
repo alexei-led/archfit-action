@@ -65,12 +65,12 @@ the App accepts none of these events.
 
 ## Modes
 
-| Mode | Engine command | Payload | Sent to |
-| --- | --- | --- | --- |
-| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src` | state report | `<endpoint>/v1/reports` |
-| `discovery` | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
-| `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
-| `reanchor` | `baseline --reanchor --from /reference/.archfit-baseline.json -c /bundle/.archfit.yaml --root /src`, then `check` | the new `.archfit-baseline.json` | `<endpoint>/v1/reanchors`; artifact only without `endpoint` |
+| Mode               | Engine command                                                                                                    | Payload                          | Sent to                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------- | ----------------------------------------------------------- |
+| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src`, plus `--base <merge base>` on a pull request                 | state report                     | `<endpoint>/v1/reports`                                     |
+| `discovery`        | `config init --root /src --output -`                                                                              | draft policy                     | `<endpoint>/v1/discoveries`                                 |
+| `baseline`         | `baseline -c /bundle/.archfit.yaml --root /src`, then `check`                                                     | `.archfit-baseline.json`         | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
+| `reanchor`         | `baseline --reanchor --from /reference/.archfit-baseline.json -c /bundle/.archfit.yaml --root /src`, then `check` | the new `.archfit-baseline.json` | `<endpoint>/v1/reanchors`; artifact only without `endpoint` |
 
 Discovery, baseline and reanchor run on the default branch only. Reports come
 from `pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode
@@ -107,24 +107,24 @@ baseline and reanchor (a reanchor also keeps the engine's report there).
 
 ## Inputs
 
-| Input | Default | Meaning |
-| --- | --- | --- |
-| `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
-| `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v3.0.0`. An image that reports another version is refused. |
-| `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
-| `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
+| Input            | Default      | Meaning                                                                                                                                                       |
+| ---------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint`       | _(empty)_    | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
+| `audience`       | _(empty)_    | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL.                                                                        |
+| `engine-version` | _(required)_ | Engine release of the image, for example `v3.0.0`. An image that reports another version is refused.                                                          |
+| `image-digest`   | _(required)_ | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused.                                                           |
+| `mode`           | _(empty)_    | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`.                                                                                        |
 
 ## Outputs
 
-| Output | Meaning |
-| --- | --- |
-| `verdict` | `healthy`, `needs_attention` or `blocked`; empty when nothing was measured. |
-| `payload-file` | The report, draft policy or baseline the engine produced. |
-| `report-file` | The engine's re-anchor report; empty unless `mode` is `reanchor`. |
-| `envelope-file` | The envelope, exactly as sent in the `X-Archfit-Envelope` header. |
-| `app-status` | HTTP status of the App's final answer; `000` when no answer arrived; empty when nothing was sent. |
-| `app-answer` | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`, `{"pull_request":12,"url":"…"}`, `{"unchanged":true}` or `{"error":"<code>"}`. |
+| Output          | Meaning                                                                                                                                                                      |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verdict`       | `healthy`, `needs_attention` or `blocked`; empty when nothing was measured.                                                                                                  |
+| `payload-file`  | The report, draft policy or baseline the engine produced.                                                                                                                    |
+| `report-file`   | The engine's re-anchor report; empty unless `mode` is `reanchor`.                                                                                                            |
+| `envelope-file` | The envelope, exactly as sent in the `X-Archfit-Envelope` header.                                                                                                            |
+| `app-status`    | HTTP status of the App's final answer; `000` when no answer arrived; empty when nothing was sent.                                                                            |
+| `app-answer`    | The App's JSON answer on one line, for example `{"conclusion":"success","reason":"healthy"}`, `{"pull_request":12,"url":"…"}`, `{"unchanged":true}` or `{"error":"<code>"}`. |
 
 The job status covers the run and the upload. On an accepted report the App's
 checks carry the verdict. The step summary repeats the App's answer: the
@@ -151,6 +151,33 @@ mounts it read-only:
 - A pull request whose head and base have more than one merge base (criss-cross
   merges) is refused. Merge the base branch into it so that one merge base
   remains.
+
+## Origin on pull requests
+
+On a `pull_request` run, the report check runs with `--base <merge base>`. The
+engine checks the merge base out in a temporary worktree and scores it with the
+same trusted inputs. Then it marks each finding of the head:
+
+- `findings[].origin` and `agent_tasks[].origin`: `introduced` (the pull request
+  added it), `pre_existing` (the merge base has it too), or `unknown` (the
+  analyzer evidence of the two sides did not pair);
+- `comparison.origin_status` (`comparable` or `unknown`) and
+  `comparison.origin_reasons`;
+- `comparison.introduced_finding_ids` and `comparison.resolved_finding_ids`.
+
+The step summary gives the origin status and the two counts. Origin is
+report-only: the verdict and the exit code are the head's alone. `push` runs
+have no base and no origin fields.
+
+Cost: one `--base` run analyses both trees, so a pull request run takes about
+two engine passes of time.
+
+When the `--base` run ends without a report (exit 3 for a git or worktree
+error, or a crash), the job does not fail for that. The log shows the engine's
+reason and a warning that origin is missing for this run. The check then runs
+again without `--base`, and that run's report is the one kept and sent. If that
+run fails too, the job fails as before. A `--base` run that hangs is bounded by
+the job's `timeout-minutes`, like any engine run.
 
 ## The envelope
 
@@ -209,13 +236,13 @@ and `kind: reanchor`. Its `baseline_digest` is required: the SHA-256 of the
 protected `.archfit-baseline.json` the engine read, the blob at `head_sha`.
 The App reads that blob itself and requires equality.
 
-| Answer | Job | Meaning |
-| --- | --- | --- |
-| 200 `{"pull_request": n, "url": "…"}` | passes | The App opened or updated the baseline pull request. An architecture owner approves its exact head commit and merges it. |
-| 200 `{"unchanged": true}` | passes | The capture equals the baseline on the default branch. Nothing was written. |
-| 409 `stale_head`, `stale_attempt` | fails | The default branch moved on, or a newer run attempt exists. No pull request was opened: dispatch the capture or the re-anchor again. |
-| 400, 401, 403, 413 | fails | Final. The error names the code and the fix, for example `policy_mismatch` or `labels_mismatch` (dispatch again on the current head), `unknown_engine_identity` (pin the manifest's image), `baseline_too_large`, or `reanchor_digest_mismatch`, `reanchor_baseline_missing` and `reanchor_not_subset` for a re-anchor. |
-| 429, 5xx, no answer | retried | As for every upload. |
+| Answer                                | Job     | Meaning                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200 `{"pull_request": n, "url": "…"}` | passes  | The App opened or updated the baseline pull request. An architecture owner approves its exact head commit and merges it.                                                                                                                                                                                                |
+| 200 `{"unchanged": true}`             | passes  | The capture equals the baseline on the default branch. Nothing was written.                                                                                                                                                                                                                                             |
+| 409 `stale_head`, `stale_attempt`     | fails   | The default branch moved on, or a newer run attempt exists. No pull request was opened: dispatch the capture or the re-anchor again.                                                                                                                                                                                    |
+| 400, 401, 403, 413                    | fails   | Final. The error names the code and the fix, for example `policy_mismatch` or `labels_mismatch` (dispatch again on the current head), `unknown_engine_identity` (pin the manifest's image), `baseline_too_large`, or `reanchor_digest_mismatch`, `reanchor_baseline_missing` and `reanchor_not_subset` for a re-anchor. |
+| 429, 5xx, no answer                   | retried | As for every upload.                                                                                                                                                                                                                                                                                                    |
 
 ## Edge cases
 
@@ -228,6 +255,9 @@ The App reads that blob itself and requires equality.
   re-anchor): the job fails with the engine's last lines and sends nothing. A
   re-anchor exits 3 when the stored file is missing or older than schema v2, or
   when the flags conflict.
+- **Base comparison fails** on a pull request: the check runs again without
+  `--base`, and the report has no origin. See
+  [Origin on pull requests](#origin-on-pull-requests).
 
 ## The container
 
@@ -235,7 +265,9 @@ The engine runs as `docker run ghcr.io/alexei-led/archfit@<digest>` with:
 
 - the workspace owner's uid and gid, `HOME=/tmp`, all capabilities dropped, and
   no other environment: no token, no OIDC variable, no credential;
-- the checkout at `/src`, with its `.git` read-only;
+- the checkout at `/src`, with its `.git` read-only. On a pull request only, an
+  empty directory from `RUNNER_TEMP` is mounted writable over
+  `/src/.git/worktrees` (see below);
 - each trusted input mounted read-only at `/bundle/<name>`, over an empty
   writable `/bundle` directory. The engine keeps its fact cache
   (`.archfit-cache/`) there, next to the config, and baseline and reanchor mode
@@ -259,9 +291,17 @@ When the pull request does not carry a baseline, nothing is mounted at
 `/bundle/.archfit-baseline.json`, and that path is writable. The engine loads
 the baseline before any analyzer runs, so analysis cannot plant one there.
 
-The action does not pass `--base`: the engine would create a git worktree, which
-the read-only `.git` forbids. The report therefore has no merge-base
-comparison, and agent-task origins against the merge base are not computed.
+`--base` checks the merge base out with `git worktree add --detach`. That
+command writes only `.git/worktrees/<name>` (`HEAD`, `index`, `gitdir`). So for
+that run an empty `RUNNER_TEMP` directory is mounted writable over
+`/src/.git/worktrees`, and the rest of `.git` stays read-only. Git on the
+runner never reads that directory. The host `.git/worktrees` is an empty
+mountpoint, created before the container starts. The worktree files go under
+`/src/.archfit-cache/worktrees/`, in the writable working tree. The engine
+removes its worktree when it finishes, but leaves a lock file, and a killed run
+leaves the whole tree. So after the container exits the action deletes
+`.archfit-cache/worktrees`. If the container made that path a symlink, the
+action leaves it in place and warns, so it never deletes outside the checkout.
 
 Dependencies the analyzers fetch (Go modules, grimp) come from public
 registries. The container gets no credentials for private ones.
