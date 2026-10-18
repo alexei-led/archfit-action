@@ -405,9 +405,10 @@ done
 begin "failed base comparison without a protected baseline: the rerun cannot read one the first run planted"
 # cross/main has a policy and no baseline, so /bundle/.archfit-baseline.json is writable.
 on_pull_request "$(git -C "$cross" rev-parse x~1)" "$cm"
-export FAKE_BASE_RC=3
+export FAKE_BASE_RC=3 FAKE_BASE_LOCKED=true # the plant, then /bundle made undeletable
 start_app "[$ok_answer]"
 run_action "$cross"
+chmod -R u+w "$RUNNER_TEMP"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "the first run had no baseline mounted, so the path was writable" json_ok \
 	'(.[0].args | index("--base")) != null and (.[0].bundle | keys) == [".archfit.yaml"]' "$(check_calls)"

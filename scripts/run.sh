@@ -270,8 +270,10 @@ check() {
 			origin="missing (the comparison with the merge base failed; see the log)"
 			# The first run could write /bundle, including a baseline where none is mounted.
 			# The engine reads its baseline before analysis, so one run cannot plant its own;
-			# a second run on the same directory would read the plant. It starts empty.
-			rm -rf -- "$bundle" && mkdir -p "$bundle"
+			# a second run on the same directory would read the plant. It gets a new one,
+			# never mounted before: the first run could make the old one undeletable.
+			bundle=$work/bundle-rerun
+			mkdir -- "$bundle"
 			rc=0
 			engine "${args[@]}" >"$state" 2>"$engine_log" || rc=$?
 			;;

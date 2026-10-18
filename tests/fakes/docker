@@ -21,7 +21,8 @@
 #                             worktree in the checkout, as a killed engine does, and writes
 #                             /bundle/.archfit-baseline.json, as analysed code can
 #   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
-#   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees
+#   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees,
+#                             and a failed `check --base` makes /bundle read-only after its plant
 #
 # `check --base` needs what docker and git need for `git worktree add` under a read-only
 # .git: the host mountpoint .git/worktrees (else docker fails, 125) and a writable mount
@@ -143,6 +144,7 @@ check)
 		if [[ -n ${FAKE_BASE_RC:-} ]]; then
 			printf 'gitdir: /src/.git/worktrees/wt\n' >"$cache/worktrees/$base/wt/.git"
 			printf '{"schema_version":"archfit.baseline.v3","accepted":["planted"]}\n' >"$bundle/.archfit-baseline.json"
+			[[ ${FAKE_BASE_LOCKED:-} != true ]] || chmod a-w "$bundle"
 			echo "error: cannot create worktree for ref \"$base\": git worktree add exited 128" >&2
 			exit "$FAKE_BASE_RC"
 		fi
