@@ -19,6 +19,11 @@
 
 ### Changed
 
+- The action runs engine v3.0.1 only. Pin `engine-version: v3.0.1` and its
+  per-platform `image-digest` from the App's manifest; v3.0.0 is refused. A
+  v3.0.1 baseline or re-anchor no longer writes `state.dimensions` or
+  `state.hard_gate_finding_ids`. The schema stays `archfit.baseline.v3`, so a
+  stored v3.0.0 baseline still loads, and the next capture drops the two fields.
 - A pull request run takes about two engine passes of time: one `--base` run
   analyses the head and the merge base.
 - If the `--base` run ends without a report, the job does not fail for that.

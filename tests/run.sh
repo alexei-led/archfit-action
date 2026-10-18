@@ -178,7 +178,7 @@ expect_eq "head_sha is the pull request head, not GITHUB_SHA" "$f1" "$(envelope_
 expect_eq "base_sha is the event's base.sha" "$c1" "$(envelope_field base_sha)"
 expect_eq "merge_base_sha" "$c1" "$(envelope_field merge_base_sha)"
 expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
-expect_eq "engine identity" "v3.0.0 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 check_call=$(engine_call check)
 expect_eq "the engine reads the policy the pull request changes from its head" \
@@ -290,7 +290,7 @@ expect_eq "labels digest is the default-branch labels blob" \
 	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
 expect_eq "labels digest is the digest of the bytes the capture read" \
 	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
-expect_eq "engine identity" "v3.0.0 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
 	'.args == ["baseline", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
@@ -694,18 +694,18 @@ run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "verdict" needs_attention "$(out verdict)"
 
-begin "an engine version other than v3.0.0 is refused before the checkout"
+begin "an engine version other than v3.0.1 is refused before the checkout"
 on_push "$c2"
-export ARCHFIT_ENGINE_VERSION=v2.3.1
+export ARCHFIT_ENGINE_VERSION=v3.0.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the one supported engine" log_has "this action runs engine v3.0.0 only"
+expect "the error names the one supported engine" log_has "this action runs engine v3.0.1 only"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 expect_eq "no container ran" 0 "$(engine_calls)"
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v3.0.0
+export ARCHFIT_IMAGE_DIGEST=v3.0.1
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
@@ -733,7 +733,7 @@ on_push "$c2"
 export FAKE_ENGINE_VERSION=v3.1.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names both versions" log_has "is engine v3.1.0, not v3.0.0"
+expect "the error names both versions" log_has "is engine v3.1.0, not v3.0.1"
 expect_eq "only the version probe ran" 1 "$(engine_calls)"
 
 begin "an image for another platform than the runner is refused before any container"
