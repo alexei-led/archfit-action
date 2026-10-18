@@ -176,7 +176,11 @@ When the `--base` run ends without a report (exit 3 for a git or worktree
 error, or a crash), the job does not fail for that. The log shows the engine's
 reason and a warning that origin is missing for this run. The check then runs
 again without `--base`, and that run's report is the one kept and sent. If that
-run fails too, the job fails as before. A `--base` run that hangs is bounded by
+run fails too, the job fails as before. The rerun starts from an empty `/bundle`,
+so a file the first run wrote there (a baseline where none is mounted, the fact
+cache) cannot reach it. The working tree is not reset: the rerun analyses the
+checkout as the first run left it. Analysed code can already change files during
+one run; the rerun gives it a whole run to do so. A `--base` run that hangs is bounded by
 the job's `timeout-minutes`, like any engine run.
 
 ## The envelope

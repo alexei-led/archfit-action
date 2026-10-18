@@ -109,7 +109,7 @@ begin() { # NAME
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
 	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
-		FAKE_BASE_RC FAKE_BASE_SYMLINK
+		FAKE_BASE_RC FAKE_BASE_SYMLINK FAKE_BASE_LOCKED
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -401,6 +401,28 @@ for base_rc in 3 137; do
 	expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 	expect_eq "the report is uploaded" 1 "$(requests upload)"
 done
+
+begin "failed base comparison without a protected baseline: the rerun cannot read one the first run planted"
+# cross/main has a policy and no baseline, so /bundle/.archfit-baseline.json is writable.
+on_pull_request "$(git -C "$cross" rev-parse x~1)" "$cm"
+export FAKE_BASE_RC=3
+start_app "[$ok_answer]"
+run_action "$cross"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the first run had no baseline mounted, so the path was writable" json_ok \
+	'(.[0].args | index("--base")) != null and (.[0].bundle | keys) == [".archfit.yaml"]' "$(check_calls)"
+expect "the rerun starts from an empty bundle" json_ok '.[1].bundle | keys == [".archfit.yaml"]' "$(check_calls)"
+expect_eq "no baseline digest" "" "$(envelope_field baseline_digest)"
+
+begin "base comparison that leaves an unwritable directory: a warning, not a failure"
+on_pull_request "$f1" "$c1"
+export FAKE_BASE_LOCKED=true
+start_app "[$ok_answer]"
+run_action "$origin"
+chmod -R u+w "$GITHUB_WORKSPACE/.archfit-cache" 2>/dev/null
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the log says what was left" log_has "could not remove all of .archfit-cache/worktrees"
+expect_eq "the report is uploaded" 1 "$(requests upload)"
 
 begin "pull request whose engine fails with and without --base: failure, nothing sent"
 on_pull_request "$f1" "$c1"

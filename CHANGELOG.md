@@ -22,8 +22,8 @@
 - A pull request run takes about two engine passes of time: one `--base` run
   analyses the head and the merge base.
 - If the `--base` run ends without a report, the job does not fail for that.
-  The check runs again without `--base`, and the log warns that origin is
-  missing for this run.
+  The check runs again without `--base`, from an empty `/bundle`, and the log
+  warns that origin is missing for this run.
 
 The envelope does not change: origin is in the state payload only.
 

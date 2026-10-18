@@ -195,7 +195,9 @@ remove_base_worktrees() {
 		warning "left ${cache#"$src/"}/worktrees in the checkout: it is not a plain directory, so it is not removed"
 		return 0
 	fi
-	rm -rf -- "$cache/worktrees"
+	# A directory the container made unwritable must not abort the run: origin never fails the job.
+	rm -rf -- "$cache/worktrees" 2>/dev/null ||
+		warning "could not remove all of ${cache#"$src/"}/worktrees from the checkout"
 	rmdir -- "$cache" 2>/dev/null || true
 }
 
@@ -266,6 +268,10 @@ check() {
 			show_engine_log
 			warning "the comparison with the merge base $base ended without a report (archfit exit $rc); origin is missing for this run. Running the check again without --base."
 			origin="missing (the comparison with the merge base failed; see the log)"
+			# The first run could write /bundle, including a baseline where none is mounted.
+			# The engine reads its baseline before analysis, so one run cannot plant its own;
+			# a second run on the same directory would read the plant. It starts empty.
+			rm -rf -- "$bundle" && mkdir -p "$bundle"
 			rc=0
 			engine "${args[@]}" >"$state" 2>"$engine_log" || rc=$?
 			;;

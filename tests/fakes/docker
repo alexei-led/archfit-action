@@ -18,8 +18,10 @@
 #   FAKE_REANCHOR_REPORT_FILE text that `baseline --reanchor` prints on stdout (default: tests/fixtures/reanchor-report.txt)
 #   FAKE_REANCHOR_RC          exit code of `baseline --reanchor` (default 0); non-zero prints an engine reason on stderr
 #   FAKE_BASE_RC              exit code of `check --base` (default: as without --base); a failure leaves a
-#                             worktree in the checkout, as a killed engine does
+#                             worktree in the checkout, as a killed engine does, and writes
+#                             /bundle/.archfit-baseline.json, as analysed code can
 #   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
+#   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees
 #
 # `check --base` needs what docker and git need for `git worktree add` under a read-only
 # .git: the host mountpoint .git/worktrees (else docker fails, 125) and a writable mount
@@ -140,10 +142,16 @@ check)
 		: >"$cache/worktrees/$base.lock"
 		if [[ -n ${FAKE_BASE_RC:-} ]]; then
 			printf 'gitdir: /src/.git/worktrees/wt\n' >"$cache/worktrees/$base/wt/.git"
+			printf '{"schema_version":"archfit.baseline.v3","accepted":["planted"]}\n' >"$bundle/.archfit-baseline.json"
 			echo "error: cannot create worktree for ref \"$base\": git worktree add exited 128" >&2
 			exit "$FAKE_BASE_RC"
 		fi
 		rm -rf "${cache:?}/worktrees/$base" "$git_worktrees/wt"
+		if [[ ${FAKE_BASE_LOCKED:-} == true ]]; then
+			mkdir -p "$cache/worktrees/locked"
+			: >"$cache/worktrees/locked/file"
+			chmod a-w "$cache/worktrees/locked"
+		fi
 		jq '.comparison += {origin_status: "comparable", introduced_finding_ids: [.findings[0].id], resolved_finding_ids: []}
 			| .findings |= (to_entries | map(.value + {origin: (if .key == 0 then "introduced" else "pre_existing" end)}))' "${FAKE_STATE:?}"
 	elif [[ -f $captured && ${FAKE_BASELINE_COMPARABLE:-true} == true ]]; then

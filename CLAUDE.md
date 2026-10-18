@@ -73,8 +73,9 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
   the host directory is a mountpoint created beforehand). After the container exits,
   `.archfit-cache/worktrees` is deleted from the checkout, never through a symlink. A
-  `--base` run without a verdict (exit 3 or a crash) is rerun without `--base` and
-  warns that origin is missing; it never fails the job by itself. No watchdog: the
+  `--base` run without a verdict (exit 3 or a crash) is rerun without `--base` on an
+  emptied `/bundle` (the first run could plant a baseline there) and warns that origin
+  is missing; it never fails the job by itself, cleanup included. No watchdog: the
   job's `timeout-minutes` bounds a hang. The envelope does not carry origin.
 - **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
   every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
