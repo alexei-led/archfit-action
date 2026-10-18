@@ -108,7 +108,8 @@ begin() { # NAME
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
+		FAKE_BASE_RC FAKE_BASE_SYMLINK FAKE_BASE_LOCKED
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -177,7 +178,7 @@ expect_eq "head_sha is the pull request head, not GITHUB_SHA" "$f1" "$(envelope_
 expect_eq "base_sha is the event's base.sha" "$c1" "$(envelope_field base_sha)"
 expect_eq "merge_base_sha" "$c1" "$(envelope_field merge_base_sha)"
 expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
-expect_eq "engine identity" "v3.0.0 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 check_call=$(engine_call check)
 expect_eq "the engine reads the policy the pull request changes from its head" \
@@ -223,8 +224,19 @@ expect "/bundle itself is a separate, empty writable directory" json_ok \
 expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
-expect "engine arguments" json_ok \
-	'.args == ["check", "--json", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src"]' "$check_call"
+expect "engine arguments: the check compares with the merge base" json_ok \
+	'.args == ["check", "--json", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
+	"$check_call" --arg m "$c1"
+expect_eq "one engine pass reports both sides" 1 "$(jq -s 'map(select(.command == "run" and .args[0] == "check")) | length' "$FAKE_DOCKER_LOG")"
+expect "the payload carries the origin of every finding" \
+	jq -e '.comparison.origin_status == "comparable" and (.comparison.introduced_finding_ids | length) == 1
+	  and all(.findings[]; .origin == "introduced" or .origin == "pre_existing")' "$payload"
+expect "only .git/worktrees is writable inside .git, from an empty RUNNER_TEMP directory" json_ok \
+	'[.[] | select(contains(":/src/.git"))] == [$s + "/.git:/src/.git:ro", $w + ":/src/.git/worktrees"]' \
+	"$options" --arg s "$GITHUB_WORKSPACE" --arg w "$RUNNER_TEMP/archfit/git-worktrees"
+expect "nothing of the base worktree is left in the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
+expect "the host .git/worktrees is an empty mountpoint" test -z "$(ls -A "$GITHUB_WORKSPACE/.git/worktrees")"
+expect "the step summary gives the origin counts" summary_has "Origin against the merge base: comparable, introduced 1, resolved 0"
 
 begin "push report: trusted inputs from the pushed commit"
 on_push "$c2"
@@ -237,6 +249,10 @@ expect_eq "pull_request, base and merge base are empty off pull requests" "0||" 
 expect_eq "head_sha is the pushed commit" "$c2" "$(envelope_field head_sha)"
 expect_eq "the policy comes from the pushed commit" \
 	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect "no base comparison off pull requests" json_ok \
+	'(.args | index("--base")) == null and ([.options[] | select(contains("worktrees"))] == [])' "$(engine_call check)"
+expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
+expect "the step summary has no origin line" test -z "$(grep -F 'Origin against' "$GITHUB_STEP_SUMMARY")"
 
 begin "workflow_dispatch discovery: draft policy to /v1/discoveries"
 on_dispatch "$c2"
@@ -274,7 +290,7 @@ expect_eq "labels digest is the default-branch labels blob" \
 	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
 expect_eq "labels digest is the digest of the bytes the capture read" \
 	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
-expect_eq "engine identity" "v3.0.0 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
 	'.args == ["baseline", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
@@ -361,6 +377,75 @@ run_action "$cross"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error explains the merge bases" log_has "more than one merge base"
 expect_eq "no engine run" 0 "$(engine_calls)"
+
+# --- Origin against the merge base: report-only, never a reason to fail -------------
+
+check_calls() { jq -cs 'map(select(.command == "run" and .args[0] == "check"))' "$FAKE_DOCKER_LOG"; }
+
+for base_rc in 3 137; do
+	begin "pull request whose base comparison exits $base_rc: reported again without origin"
+	on_pull_request "$f1" "$c1"
+	export FAKE_BASE_RC=$base_rc
+	start_app "[$ok_answer]"
+	run_action "$origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	calls=$(check_calls)
+	expect "the check ran with --base, then again without it" json_ok \
+		'length == 2 and (.[0].args | index("--base")) != null and (.[1].args | index("--base")) == null
+		 and ([.[1].options[] | select(contains("worktrees"))] == [])' "$calls"
+	expect "the log says origin is missing for this run" log_has "origin is missing for this run"
+	expect "the log shows the engine's reason" log_has "git worktree add exited 128"
+	expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
+	expect "the step summary says origin is missing" summary_has "Origin against the merge base: missing"
+	expect "the left-over worktree is removed from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
+	expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+	expect_eq "the report is uploaded" 1 "$(requests upload)"
+done
+
+begin "failed base comparison without a protected baseline: the rerun cannot read one the first run planted"
+# cross/main has a policy and no baseline, so /bundle/.archfit-baseline.json is writable.
+on_pull_request "$(git -C "$cross" rev-parse x~1)" "$cm"
+export FAKE_BASE_RC=3 FAKE_BASE_LOCKED=true # the plant, then /bundle made undeletable
+start_app "[$ok_answer]"
+run_action "$cross"
+chmod -R u+w "$RUNNER_TEMP"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the first run had no baseline mounted, so the path was writable" json_ok \
+	'(.[0].args | index("--base")) != null and (.[0].bundle | keys) == [".archfit.yaml"]' "$(check_calls)"
+expect "the rerun starts from an empty bundle" json_ok '.[1].bundle | keys == [".archfit.yaml"]' "$(check_calls)"
+expect_eq "no baseline digest" "" "$(envelope_field baseline_digest)"
+
+begin "base comparison that leaves an unwritable directory: a warning, not a failure"
+on_pull_request "$f1" "$c1"
+export FAKE_BASE_LOCKED=true
+start_app "[$ok_answer]"
+run_action "$origin"
+chmod -R u+w "$GITHUB_WORKSPACE/.archfit-cache" 2>/dev/null
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the log says what was left" log_has "could not remove all of .archfit-cache/worktrees"
+expect_eq "the report is uploaded" 1 "$(requests upload)"
+
+begin "pull request whose engine fails with and without --base: failure, nothing sent"
+on_pull_request "$f1" "$c1"
+export FAKE_CHECK_RC=3
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "the check ran twice" 2 "$(check_calls | jq length)"
+expect "the error is the engine's" log_has "archfit exited 3: no report was produced"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "base comparison that links .archfit-cache out of the checkout: the link is not followed"
+on_pull_request "$f1" "$c1"
+outside=$case_dir/outside
+mkdir -p "$outside/worktrees"
+: >"$outside/worktrees/keep"
+export FAKE_BASE_SYMLINK=$outside
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "nothing behind the link is deleted" test -f "$outside/worktrees/keep"
+expect "the log says the directory was left" log_has "it is not a plain directory, so it is not removed"
 
 # --- The validator itself: it must reject what the App's decoder rejects --------------
 
@@ -609,18 +694,18 @@ run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "verdict" needs_attention "$(out verdict)"
 
-begin "an engine version other than v3.0.0 is refused before the checkout"
+begin "an engine version other than v3.0.1 is refused before the checkout"
 on_push "$c2"
-export ARCHFIT_ENGINE_VERSION=v2.3.1
+export ARCHFIT_ENGINE_VERSION=v3.0.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the one supported engine" log_has "this action runs engine v3.0.0 only"
+expect "the error names the one supported engine" log_has "this action runs engine v3.0.1 only"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 expect_eq "no container ran" 0 "$(engine_calls)"
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v3.0.0
+export ARCHFIT_IMAGE_DIGEST=v3.0.1
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
@@ -648,7 +733,7 @@ on_push "$c2"
 export FAKE_ENGINE_VERSION=v3.1.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names both versions" log_has "is engine v3.1.0, not v3.0.0"
+expect "the error names both versions" log_has "is engine v3.1.0, not v3.0.1"
 expect_eq "only the version probe ran" 1 "$(engine_calls)"
 
 begin "an image for another platform than the runner is refused before any container"

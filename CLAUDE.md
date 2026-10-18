@@ -28,7 +28,7 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   with `tests/fakes/docker` (engine shim), `tests/fakes/app.py` (App + OIDC token server),
   `tests/events/` (event payloads), `tests/validate/` (Go envelope validator, pinned by go.sum)
 - `tests/engine-smoke.sh` — the real pinned image (CI only; needs docker)
-- `tests/fixtures/` — a re-anchor report and baselines the v3.0.0 engine produced (the
+- `tests/fixtures/` — a re-anchor report and baselines the v3.0.1 engine produced (the
   docker shim replays them); `stored-baseline.json` is the protected file a re-anchor reads
 
 ## Invariants
@@ -37,7 +37,7 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   This repo vendors `schema/envelope.v1.schema.json` byte for byte and conforms. Change
   it only by re-vendoring a new App revision: update `SCHEMA_SOURCE` and its sha256 in
   the same commit. An additive App change ships in the App first. No compatibility is
-  kept with older App schemas or engine versions: the Action supports engine v3.0.0 only.
+  kept with older App schemas or engine versions: the Action supports engine v3.0.1 only.
 - **The envelope states what was analysed; it proves nothing.** Every field is
   self-reported. The identity fields (`engine_version`, `image_digest`, `platform`) and
   the input digests are claims the App compares with its manifest and the protected
@@ -54,7 +54,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   commit. Digests are taken before the container starts. Never read them from the
   working tree (eol rules change the bytes).
 - **The container gets nothing secret.** No `--env-file`, no bare `-e NAME` (it copies
-  the host value), no `ACTIONS_*`, no token. `.git` is mounted read-only; refuse a
+  the host value), no `ACTIONS_*`, no token. `.git` is mounted read-only (but see
+  origin below for `.git/worktrees`); refuse a
   checkout with credential keys (`extraheader`, `credential.*`, `url.*.insteadOf`,
   `includeIf.*`) or a userinfo remote URL in `.git/config` or `.git/modules/*/config`.
   The OIDC token is minted after the container exits. Run no git on the runner after
@@ -65,7 +66,18 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   `:ro` at `/reference/.archfit-baseline.json`, outside `/bundle`, so the engine's output
   is never its input. The working tree is writable: `uv run`
   writes `.venv` and `uv.lock`. Payloads are read from stdout into `RUNNER_TEMP`,
-  outside every mount. No `--base`: it needs a writable `.git`.
+  outside every mount.
+- **Origin is report-only, and its one git write is fenced.** A pull request report runs
+  `check --base <merge_base>`; push, dispatch and the baseline self-checks do not. For
+  that run only, an empty `RUNNER_TEMP` directory is mounted writable over
+  `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
+  the host directory is a mountpoint created beforehand). After the container exits,
+  `.archfit-cache/worktrees` is deleted from the checkout, never through a symlink. A
+  `--base` run without a verdict (exit 3 or a crash) is rerun without `--base` on a
+  new, empty `/bundle` directory (the first run could plant a baseline in the old one
+  and make it undeletable) and warns that origin is missing; it never fails the job by
+  itself, cleanup included. No watchdog: the job's `timeout-minutes` bounds a hang.
+  The envelope does not carry origin.
 - **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
   every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
   in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the
@@ -100,7 +112,7 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   or one that is not on the default branch, before any upload.
 - **Fork pull requests cannot hold `id-token: write`.** They are analysed and kept as
   an artifact, never uploaded. Do not add a fallback that makes them look enforceable.
-- **One engine.** The Action runs engine v3.0.0 only. Older engines, schemas and
+- **One engine.** The Action runs engine v3.0.1 only. Older engines, schemas and
   envelope shapes are refused, not adapted (no users yet; see the v2.0.0 release notes).
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.
   Never suggest `:latest` or a tag. The image platform must equal the runner's

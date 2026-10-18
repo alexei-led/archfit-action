@@ -5,7 +5,7 @@
 # The engine image. The image-digest input selects the build inside it.
 readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 # The only engine release this action runs (the App's manifest names its image digests).
-readonly SUPPORTED_ENGINE_VERSION=v3.0.0
+readonly SUPPORTED_ENGINE_VERSION=v3.0.1
 # The engine state contract this action carries (`archfit check --json`).
 readonly STATE_SCHEMA=archfit.architecture-state.v1
 
@@ -15,6 +15,8 @@ die() {
 }
 
 notice() { printf '::notice::%s\n' "$(escape "$*")"; }
+
+warning() { printf '::warning::%s\n' "$(escape "$*")"; }
 
 # escape encodes a workflow-command message on one line, so text that came from
 # the engine, the repository or the App cannot start a command of its own.

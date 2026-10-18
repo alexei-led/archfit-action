@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.1.0
+
+### Added
+
+- Pull request reports carry the origin of each finding. The check runs with
+  `--base <merge base>`, and the engine fills `findings[].origin` and
+  `agent_tasks[].origin` (`introduced`, `pre_existing` or `unknown`),
+  `comparison.origin_status`, `introduced_finding_ids` and
+  `resolved_finding_ids`. Origin is report-only: the verdict and the exit code
+  do not change. The step summary shows the origin status and counts. `push`
+  runs are unchanged.
+- For that run only, an empty `RUNNER_TEMP` directory is mounted writable over
+  `/src/.git/worktrees`, so the engine can run `git worktree add`. The rest of
+  `.git` stays read-only. After the run, the action deletes the worktree the
+  engine leaves under `.archfit-cache/worktrees`, and refuses to follow a
+  symlink there.
+
+### Changed
+
+- The action runs engine v3.0.1 only. Pin `engine-version: v3.0.1` and its
+  per-platform `image-digest` from the App's manifest; v3.0.0 is refused. A
+  v3.0.1 baseline or re-anchor no longer writes `state.dimensions` or
+  `state.hard_gate_finding_ids`. The schema stays `archfit.baseline.v3`, so a
+  stored v3.0.0 baseline still loads, and the next capture drops the two fields.
+- A pull request run takes about two engine passes of time: one `--base` run
+  analyses the head and the merge base.
+- If the `--base` run ends without a report, the job does not fail for that.
+  The check runs again without `--base`, from an empty `/bundle`, and the log
+  warns that origin is missing for this run.
+
+The envelope does not change: origin is in the state payload only.
+
 ## v2.0.0
 
 Breaking. The action runs engine v3.0.0 only. No users depend on v1.x, so there
