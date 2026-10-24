@@ -686,13 +686,15 @@ expect_eq "the action fails on blocked" 1 "$action_rc"
 expect "the envelope is written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 expect "the error says why" log_has "verdict is blocked"
 
-begin "no endpoint: needs_attention passes"
+begin "no endpoint: needs_attention cannot conceal failed hard gates"
 on_push "$c2"
+# Deliberately contradictory negative input, not a genuine optional-attention capture.
 jq '.verdict = "needs_attention"' "$state_doc" >"$case_dir/attention.json"
 export FAKE_STATE=$case_dir/attention.json
 run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the action fails" 1 "$action_rc"
 expect_eq "verdict" needs_attention "$(out verdict)"
+expect "the error names the unsatisfied local gate" log_has "hard gates did not pass"
 
 begin "an engine version other than v3.0.1 is refused before the checkout"
 on_push "$c2"
@@ -1101,5 +1103,9 @@ mutate reanchor-short-baseline-digest '.baseline_digest = ("5b" * 31)' "$tmp/rea
 mutate reanchor-prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)' "$tmp/reanchor.envelope"
 mutate reanchor-with-pull-request '.pull_request = 42' "$tmp/reanchor.envelope"
 mutate reanchor-with-base-sha ".base_sha = \"$ra\"" "$tmp/reanchor.envelope"
+
+begin "no-endpoint report-stage required-evidence regressions"
+expect "genuine optional attention passes; required gaps and malformed decisions fail" \
+	bash "$root/tests/report-evidence.sh"
 
 finish

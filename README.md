@@ -48,11 +48,16 @@ Do not add a checkout step: the action does its own, without persisted
 credentials.
 
 Without `endpoint` the action analyzes only: nothing is sent, the report or the
-captured baseline is a workflow artifact, and a `blocked` verdict fails the job. No App checks that a
-policy owner approved a pull request's change to the policy, baseline or labels,
-so a pull request is measured against the base branch's files only. Its own
-edits to them have no effect, and a pull request that deletes `.archfit.yaml`
-fails.
+captured baseline is a workflow artifact. For reports, this job is the local gate:
+`blocked`, unavailable required evidence (`decision.hard_gates` not `pass` or
+nonempty `decision.unevaluated_required_rules`), active blockers, or missing/invalid
+decision evidence fail the job. Optional `needs_attention` still succeeds when the
+hard gates pass and no required rules are unevaluated. An omitted empty required-rule
+list is valid; an explicit `null` or a non-array is not. This local gate is not App
+approval. No App checks that a policy owner approved a pull request's change to
+the policy, baseline or labels, so a pull request is measured against the base
+branch's files only. Its own edits to them have no effect, and a pull request that
+deletes `.archfit.yaml` fails.
 
 `endpoint` is the App base URL over `https`, without a trailing slash. Plain
 `http` is accepted only for `127.0.0.1` and `localhost`.
@@ -250,9 +255,10 @@ The App reads that blob itself and requires equality.
 
 ## Edge cases
 
-- **Fork pull requests** get no OIDC token from GitHub. The action analyzes and
-  keeps the report as an artifact, sends nothing, and exits 0. The App marks the
-  pull request `fork_unsupported`.
+- **Fork pull requests** get no OIDC token from GitHub. With `endpoint`, the action
+  analyzes and keeps the report as an artifact, sends nothing, and exits 0. The
+  App marks the pull request `fork_unsupported`. Without `endpoint`, the local
+  report gate described above applies.
 - **No policy** on the protected ref: nothing is measured or sent. Dispatch the
   workflow with `mode: discovery` on the default branch.
 - **Engine exit 3** (no report, or a stored baseline the engine cannot
@@ -322,12 +328,19 @@ platform must equal the runner's (`X64` → `linux/amd64`, `ARM64` →
 ```sh
 curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/0649e504a6761f565086b342d315110feeb27d77/internal/extract/golang/testdata/single-module/baseline.json
 ARCHFIT_TEST_STATE=/tmp/state.json bash tests/run.sh   # needs git, jq, curl, python3, go
+bash tests/report-evidence.sh                         # report-stage guard only; needs jq, curl
 bash tests/engine-smoke.sh                             # needs docker and network
 shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
 ```
 
 `tests/run.sh` runs the shipped scripts against scratch repositories, with a
-docker shim, a local App and token server, and a no-op `sleep`.
+docker shim, a local App and token server, and a no-op `sleep`. It also runs
+`tests/report-evidence.sh`, which replays genuine candidate state captures only
+through the report stage, plus deliberate malformed/contradictory negative inputs.
+[Fixture provenance](tests/fixtures/required-evidence/SOURCE.md) records the candidate
+source, local image and byte hashes. Those report-stage tests neither adopt that
+engine nor prove executed identity; full legacy conformance uses the separate pinned
+v3.0.1 state above.
 `tests/engine-smoke.sh` runs the real pinned image. The re-anchor fixtures in
 `tests/fixtures/` (`reanchored-baseline.json`, `reanchor-report.txt`) are its
 re-anchor of `stored-baseline.json`. CI uploads them as the `engine-fixtures`

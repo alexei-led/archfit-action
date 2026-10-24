@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Without an App endpoint, report mode fails when required evidence is unavailable,
+  hard gates do not pass, active blockers remain, or decision evidence is missing or
+  malformed. Optional `needs_attention` still passes with passing hard gates and no
+  unevaluated required rules. App uploads, fork handling and artifact-only discovery,
+  baseline and re-anchor modes are unchanged. Engine and image pins are unchanged.
+
 ## v2.1.0
 
 ### Added
