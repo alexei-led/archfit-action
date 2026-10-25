@@ -10,7 +10,7 @@
 # known-bad envelopes must fail the same validator.
 #
 # Needs bash, git, jq, curl, python3 and go, plus ARCHFIT_TEST_STATE: a real
-# archfit.architecture-state.v1 document (CI fetches one pinned by commit and sha256).
+# archfit.architecture-state.v1 document (the vendored release capture is hash-pinned in CI).
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 # shellcheck source=tests/helpers.sh
@@ -178,7 +178,7 @@ expect_eq "head_sha is the pull request head, not GITHUB_SHA" "$f1" "$(envelope_
 expect_eq "base_sha is the event's base.sha" "$c1" "$(envelope_field base_sha)"
 expect_eq "merge_base_sha" "$c1" "$(envelope_field merge_base_sha)"
 expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
-expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.2.0 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 check_call=$(engine_call check)
 expect_eq "the engine reads the policy the pull request changes from its head" \
@@ -209,8 +209,9 @@ expect "the step summary lists the trusted inputs" grep -q 'Trusted input' "$GIT
 options=$(jq -c .options <<<"$check_call")
 expect "container runs as the workspace owner" \
 	json_ok 'index("--user") as $i | .[$i + 1] == $u' "$options" --arg u "$(id -u):$(id -g)"
-expect "container gets HOME=/tmp and no other variable" \
-	json_ok '[range(length) as $i | select(.[$i] == "--env" or .[$i] == "-e") | .[$i + 1]] == ["HOME=/tmp"]' "$options"
+expect "container gets only fixed HOME and checkout-scoped Git trust" \
+	json_ok '[range(length) as $i | select(.[$i] == "--env" or .[$i] == "-e") | .[$i + 1]] ==
+	  ["HOME=/tmp", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/src"]' "$options"
 expect "no env file" json_ok 'index("--env-file") == null' "$options"
 expect "no token or OIDC variable reaches the container" \
 	json_ok '[.options[], .args[]] | map(select(test("ACTIONS_|TOKEN"))) == []' "$check_call"
@@ -225,7 +226,7 @@ expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
 expect "engine arguments: the check compares with the merge base" json_ok \
-	'.args == ["check", "--json", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
+	'.args == ["check", "--json", "--refresh", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
 	"$check_call" --arg m "$c1"
 expect_eq "one engine pass reports both sides" 1 "$(jq -s 'map(select(.command == "run" and .args[0] == "check")) | length' "$FAKE_DOCKER_LOG")"
 expect "the payload carries the origin of every finding" \
@@ -290,12 +291,13 @@ expect_eq "labels digest is the default-branch labels blob" \
 	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
 expect_eq "labels digest is the digest of the bytes the capture read" \
 	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
-expect_eq "engine identity" "v3.0.1 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.2.0 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
-	'.args == ["baseline", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
+	'.args == ["baseline", "--refresh", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
 	 and (.bundle | keys) == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
 expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
+expect "the self-check requests fresh evidence" json_ok '.args | index("--refresh") != null' "$(engine_call check)"
 expect_eq "one upload" 1 "$(requests upload)"
 expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
 expect_eq "the header carries the envelope file byte for byte" "$(<"$envelope")" "$(upload_field 0 .envelope)"
@@ -390,6 +392,7 @@ for base_rc in 3 137; do
 	run_action "$origin"
 	expect_eq "the action succeeds" 0 "$action_rc"
 	calls=$(check_calls)
+	expect "both origin and fallback request fresh evidence" json_ok 'all(.[]; .args | index("--refresh") != null)' "$calls"
 	expect "the check ran with --base, then again without it" json_ok \
 		'length == 2 and (.[0].args | index("--base")) != null and (.[1].args | index("--base")) == null
 		 and ([.[1].options[] | select(contains("worktrees"))] == [])' "$calls"
@@ -686,26 +689,31 @@ expect_eq "the action fails on blocked" 1 "$action_rc"
 expect "the envelope is written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 expect "the error says why" log_has "verdict is blocked"
 
-begin "no endpoint: needs_attention passes"
+begin "no endpoint: needs_attention cannot conceal failed hard gates"
 on_push "$c2"
+# Deliberately contradictory negative input, not a genuine optional-attention capture.
 jq '.verdict = "needs_attention"' "$state_doc" >"$case_dir/attention.json"
 export FAKE_STATE=$case_dir/attention.json
 run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "verdict" needs_attention "$(out verdict)"
-
-begin "an engine version other than v3.0.1 is refused before the checkout"
-on_push "$c2"
-export ARCHFIT_ENGINE_VERSION=v3.0.0
-run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the one supported engine" log_has "this action runs engine v3.0.1 only"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
-expect_eq "no container ran" 0 "$(engine_calls)"
+expect_eq "verdict" needs_attention "$(out verdict)"
+expect "the error names the unsatisfied local gate" log_has "hard gates did not pass"
+
+for unsupported in v3.0.0 v3.0.1; do
+	begin "engine $unsupported is refused before the checkout"
+	on_push "$c2"
+	export ARCHFIT_ENGINE_VERSION=$unsupported
+	run_action "$origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect "the error names the one supported engine" log_has "this action runs engine v3.2.0 only"
+	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+	expect_eq "no container ran" 0 "$(engine_calls)"
+
+done
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v3.0.1
+export ARCHFIT_IMAGE_DIGEST=v3.2.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
@@ -733,7 +741,7 @@ on_push "$c2"
 export FAKE_ENGINE_VERSION=v3.1.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names both versions" log_has "is engine v3.1.0, not v3.0.1"
+expect "the error names both versions" log_has "is engine v3.1.0, not v3.2.0"
 expect_eq "only the version probe ran" 1 "$(engine_calls)"
 
 begin "an image for another platform than the runner is refused before any container"
@@ -819,13 +827,13 @@ expect_eq "the run succeeds" 0 "$action_rc"
 
 # --- Baseline capture -----------------------------------------------------------------
 
-begin "baseline without an endpoint: captured, self-checked, kept as an artifact only"
+begin "baseline without an endpoint: freshly captured, self-checked, kept as an artifact only"
 on_push "$c2"
 export ARCHFIT_MODE=baseline
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
-	'.args == ["baseline", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
+	'.args == ["baseline", "--refresh", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
 	 and (.bundle | keys) == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
 expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
 expect_eq "the payload is the captured file" .archfit-baseline.json "$(basename "$(out payload-file)")"
@@ -992,7 +1000,7 @@ expect_eq "pull request, base and merge base are empty off pull requests" "0||" 
 expect_eq "head_sha is the default-branch commit" "$ra" "$(envelope_field head_sha)"
 expect_eq "app-answer is the proposal" '{"pull_request":12,"url":"https://github.com/acme/shop/pull/12"}' "$(out app-answer)"
 expect_eq "the engine re-anchors from the mounted protected file" \
-	'["baseline","--reanchor","--from","/reference/.archfit-baseline.json","-c","/bundle/.archfit.yaml","--root","/src"]' \
+	'["baseline","--refresh","--reanchor","--from","/reference/.archfit-baseline.json","-c","/bundle/.archfit.yaml","--root","/src"]' \
 	"$(engine_call baseline | jq -c .args)"
 expect_eq "the protected file is mounted from the protected blob" "$stored_digest" "$(engine_call baseline | jq -r .reference)"
 expect "the protected file is mounted read-only, outside /bundle" json_ok \
@@ -1101,5 +1109,9 @@ mutate reanchor-short-baseline-digest '.baseline_digest = ("5b" * 31)' "$tmp/rea
 mutate reanchor-prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)' "$tmp/reanchor.envelope"
 mutate reanchor-with-pull-request '.pull_request = 42' "$tmp/reanchor.envelope"
 mutate reanchor-with-base-sha ".base_sha = \"$ra\"" "$tmp/reanchor.envelope"
+
+begin "no-endpoint report-stage required-evidence regressions"
+expect "genuine optional attention passes; required gaps and malformed decisions fail" \
+	bash "$root/tests/report-evidence.sh"
 
 finish

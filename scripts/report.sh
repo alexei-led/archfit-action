@@ -75,8 +75,26 @@ set_output envelope-file "$envelope_file"
 
 if [[ -z $endpoint ]]; then
 	notice "no endpoint: nothing was sent; the envelope is $envelope_file"
-	[[ $kind != report || $verdict != blocked ]] ||
-		die "the architecture verdict is blocked. Without an App endpoint this job is the gate; the archfit-report artifact lists the blocking findings."
+	if [[ $kind == report ]]; then
+		[[ $verdict != blocked ]] ||
+			die "the architecture verdict is blocked. Without an App endpoint this job is the gate; the archfit-report artifact lists the blocking findings."
+		# Optional attention is not a blocker, but absent required evidence is not a pass.
+		# The producer omits an empty required-rule list; explicit null is not an array.
+		jq -e -s --arg verdict "$verdict" '
+			length == 1 and (.[0] |
+			  .verdict == $verdict and (.verdict == "healthy" or .verdict == "needs_attention") and
+			  (.decision | type == "object" and
+			    (.hard_gates == "pass" or .hard_gates == "fail" or .hard_gates == "unmeasured") and
+			    all(.active_blockers, .attention_dimensions, .unknown_dimensions;
+			      type == "number" and . >= 0 and floor == .) and
+			    (if has("unevaluated_required_rules") then
+			       .unevaluated_required_rules | type == "array"
+			     else true end)))' "$payload" >/dev/null 2>&1 ||
+			die "the report has missing or invalid decision evidence. Without an App endpoint this job is the gate; inspect the archfit-report artifact."
+		jq -e '.decision | .hard_gates == "pass" and .active_blockers == 0 and
+			((.unevaluated_required_rules // []) | length) == 0' "$payload" >/dev/null ||
+			die "required architecture evidence is unavailable, hard gates did not pass, or active blockers remain. Without an App endpoint this job is the gate; inspect decision.hard_gates, decision.active_blockers and decision.unevaluated_required_rules in the archfit-report artifact."
+	fi
 	exit 0
 fi
 

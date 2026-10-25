@@ -14,13 +14,15 @@
 # approval, so every file comes from the base tip. Push and dispatch runs read the
 # files from the protected ref the run executed on.
 #
-# Container. The checkout is mounted at /src with .git read-only; each trusted input is
+# Container. Git trusts only /src through fixed command-environment config: bind
+# mount ownership can differ from the runner UID. No host/global Git config is changed.
+# The checkout is mounted at /src with .git read-only; each trusted input is
 # mounted read-only over /bundle/<name>; /bundle itself is an empty writable directory
 # for the engine's fact cache and a captured baseline. A re-anchor also reads the
 # protected baseline, mounted read-only at /reference/.archfit-baseline.json: not under
-# /bundle, where the engine writes the new one. HOME=/tmp, and nothing else: no
-# token, no OIDC variable, no credential. The working tree stays writable because
-# analyzers write there (`uv run` creates .venv and uv.lock in a Python project). .git
+# /bundle, where the engine writes the new one. Only fixed HOME/Git settings are
+# passed: no token, OIDC variable, credential, or copied host environment. The working tree stays writable because
+# target build tools and indexers can write there. .git
 # is read-only so code that runs during analysis cannot plant git config or hooks for
 # git on the runner to execute later. Reports are read from the engine's stdout into
 # RUNNER_TEMP, outside every mount.
@@ -175,6 +177,9 @@ engine() {
 		--user "$(id -u):$(id -g)" \
 		--cap-drop ALL --security-opt no-new-privileges \
 		--env HOME=/tmp \
+		--env GIT_CONFIG_COUNT=1 \
+		--env GIT_CONFIG_KEY_0=safe.directory \
+		--env GIT_CONFIG_VALUE_0=/src \
 		--volume "$src:/src" \
 		--volume "$src/.git:/src/.git:ro" \
 		--volume "$bundle:/bundle" \
@@ -254,7 +259,7 @@ engine_identity() {
 # does not fail the job: the check runs again without BASE and has no origin.
 check() {
 	local state=$1 base=${2:-} rc=0 schema expected
-	local args=(check --json --progress=none -c /bundle/.archfit.yaml --root /src)
+	local args=(check --json --refresh --progress=none -c /bundle/.archfit.yaml --root /src)
 	if [[ -n $base ]]; then
 		engine "${args[@]}" --base "$base" >"$state" 2>"$engine_log" || rc=$?
 		remove_base_worktrees
@@ -308,7 +313,7 @@ capture_baseline() {
 	local what=$1 captured=$bundle/.archfit-baseline.json
 	shift
 	rm -f "$captured"
-	engine baseline "$@" -c /bundle/.archfit.yaml --root /src >"$out/engine.out" 2>"$engine_log" ||
+	engine baseline --refresh "$@" -c /bundle/.archfit.yaml --root /src >"$out/engine.out" 2>"$engine_log" ||
 		engine_failed "archfit could not $what"
 	show_engine_log
 	if [[ -s $out/engine.out ]]; then

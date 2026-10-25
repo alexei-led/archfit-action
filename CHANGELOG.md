@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.2.0
+
+### Changed
+
+- Run engine v3.2.0 only, using its verified per-platform image manifests. Older
+  engine inputs are refused before checkout. Native CI covers amd64 and arm64.
+- Refresh analyzer facts for reports, baseline capture, reanchor, and self-checks.
+- Trust only the mounted `/src` checkout through fixed container Git settings.
+  This keeps history available when bind-mount ownership differs from the runner
+  UID. Host/global Git configuration and credential isolation are unchanged.
+- Replace test captures with unmodified released-image outputs and record hashes.
+  Fix envelope-schema provenance to its actual unchanged App source revision.
+
+### Fixed
+
+- Without an App endpoint, report mode fails when required evidence is unavailable,
+  hard gates do not pass, active blockers remain, or decision evidence is missing or
+  malformed. Optional `needs_attention` still passes with passing hard gates and no
+  unevaluated required rules. App uploads, fork handling and artifact-only discovery,
+  baseline and re-anchor modes retain their existing upload behavior.
+
+### Upgrade
+
+1. Update the Action commit, `engine-version: v3.2.0`, and matching platform digest
+   together, after the App approves that tuple. Older pins cannot run this Action.
+2. Run fresh scans before reviewing a baseline migration. Changed producer semantics
+   do not automatically accept debt or repair missing required evidence.
+
 ## v2.1.0
 
 ### Added
