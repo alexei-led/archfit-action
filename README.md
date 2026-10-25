@@ -39,8 +39,8 @@ jobs:
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v3.0.1"
-          image-digest: "sha256:9aac269fa350e643054cbe5ced58426b4ed46000f30d60f49564aa605ece2408"
+          engine-version: "v3.2.0"
+          image-digest: "sha256:5f2d4a5fff1ace10d7b08937429179631ae0c1d0e1f9e6f37c72b30954cf00db"
           mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
 ```
 
@@ -116,7 +116,7 @@ baseline and reanchor (a reanchor also keeps the engine's report there).
 | --- | --- | --- |
 | `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v3.0.1`. An image that reports another version is refused. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v3.2.0`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
 | `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
 
@@ -273,8 +273,9 @@ The App reads that blob itself and requires equality.
 
 The engine runs as `docker run ghcr.io/alexei-led/archfit@<digest>` with:
 
-- the workspace owner's uid and gid, `HOME=/tmp`, all capabilities dropped, and
-  no other environment: no token, no OIDC variable, no credential;
+- the workspace owner's uid and gid, all capabilities dropped, and fixed
+  `HOME=/tmp` plus container-only Git trust for `/src`. No token, OIDC variable,
+  credential, or copied host environment. No host/global Git config changes;
 - the checkout at `/src`, with its `.git` read-only. On a pull request only, an
   empty directory from `RUNNER_TEMP` is mounted writable over
   `/src/.git/worktrees` (see below);
@@ -291,8 +292,8 @@ could read them: auth headers, credential helpers, `url.*.insteadOf` rewrites,
 `includeIf` entries, or remote URLs with a user name or token, in `.git/config`
 or in a submodule's `.git/modules/*/config`.
 
-The working tree stays writable because analyzers write there: `uv run` creates
-`.venv` and `uv.lock` in a Python project. Treat the checkout as scratch after
+The working tree stays writable because target build tools and indexers can write
+there. Treat the checkout as scratch after
 the action ran. The engine's repair commands name the container layout
 (`archfit check -c /bundle/.archfit.yaml --root /src`); run
 `archfit check -c .archfit.yaml` locally.
@@ -313,8 +314,13 @@ leaves the whole tree. So after the container exits the action deletes
 `.archfit-cache/worktrees`. If the container made that path a symlink, the
 action leaves it in place and warns, so it never deletes outside the checkout.
 
-Dependencies the analyzers fetch (Go modules, grimp) come from public
-registries. The container gets no credentials for private ones.
+The image preinstalls its analyzers. Target build tools and indexers can execute
+code and fetch project dependencies. The container receives no registry credentials.
+It is not network-isolated: target code can exfiltrate mounted source.
+Reports remain customer-attested, not independent proof of execution.
+
+Report, baseline capture, reanchor, and their self-checks use `--refresh`. This avoids
+reusing local analyzer caches for a published run. It does not make untrusted code safe.
 
 ## Requirements
 
@@ -326,25 +332,25 @@ platform must equal the runner's (`X64` → `linux/amd64`, `ARM64` →
 ## Development
 
 ```sh
-curl -fsSLo /tmp/state.json https://raw.githubusercontent.com/alexei-led/archfit/0649e504a6761f565086b342d315110feeb27d77/internal/extract/golang/testdata/single-module/baseline.json
-ARCHFIT_TEST_STATE=/tmp/state.json bash tests/run.sh   # needs git, jq, curl, python3, go
-bash tests/report-evidence.sh                         # report-stage guard only; needs jq, curl
-bash tests/engine-smoke.sh                             # needs docker and network
+ARCHFIT_TEST_STATE=tests/fixtures/state.json bash tests/run.sh # git, jq, curl, python3, go
+bash tests/report-evidence.sh                              # report-stage guard only
+bash tests/engine-smoke.sh                                 # native docker and network
 shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
 ```
 
-`tests/run.sh` runs the shipped scripts against scratch repositories, with a
-docker shim, a local App and token server, and a no-op `sleep`. It also runs
-`tests/report-evidence.sh`, which replays genuine candidate state captures only
-through the report stage, plus deliberate malformed/contradictory negative inputs.
-[Fixture provenance](tests/fixtures/required-evidence/SOURCE.md) records the candidate
-source, local image and byte hashes. Those report-stage tests neither adopt that
-engine nor prove executed identity; full legacy conformance uses the separate pinned
-v3.0.1 state above.
-`tests/engine-smoke.sh` runs the real pinned image. The re-anchor fixtures in
-`tests/fixtures/` (`reanchored-baseline.json`, `reanchor-report.txt`) are its
-re-anchor of `stored-baseline.json`. CI uploads them as the `engine-fixtures`
-artifact (`ARCHFIT_FIXTURES_OUT`). After an engine bump, commit that artifact.
+`tests/run.sh` drives the shipped scripts on scratch repositories. Only process and
+network boundaries are faked. Its state and reanchor fixtures are unmodified outputs
+from the released v3.2.0 image. [Fixture provenance](tests/fixtures/SOURCE.md) records
+producer identity and byte hashes. The stored v3.0.0 baseline remains historical.
+
+`tests/report-evidence.sh` replays genuine release captures through the report stage,
+plus deliberate malformed/contradictory negative inputs. Its transport wrappers are
+synthetic, not execution proof. [Guard fixture provenance](tests/fixtures/required-evidence/SOURCE.md)
+records the actual release workflow, platform digest, and hashes.
+
+`tests/engine-smoke.sh` runs the real published platform image. CI tests both native
+Linux platforms and uploads `engine-fixtures-amd64` / `engine-fixtures-arm64` artifacts
+when `ARCHFIT_FIXTURES_OUT` is set. App approval and connected runs remain separate gates.
 
 ## License
 

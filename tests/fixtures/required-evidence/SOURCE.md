@@ -1,39 +1,27 @@
 # Required-evidence report-stage fixtures
 
-These are **unmodified engine outputs**, not hand-written positive states. Both
-use `archfit.architecture-state.v1` and came from the local, unreleased candidate
-`11e84d1152d96ca724ac27326932ff8a689a6439`, image
-`sha256:c206455444ebae08fad47b2b3a4ff503e8b466f615bc4cf8a2a3c6d954302714`
-(`archfit-upgrade-image:integrated-11e84d11`, `linux/arm64`). This is **not** an
-admitted or released v3.0.1 producer, nor a new supported-engine pin.
+Both files are unmodified `archfit.architecture-state.v1` outputs from the released
+v3.2.0 image, source `faa4eb4e513859567fd6c380230c91ea22fdaab6`:
+`ghcr.io/alexei-led/archfit@sha256:725c3a074358df8ea41881296eda06b07daed7934d7a6d40bb1ecfc3c8a8128d` (`linux/arm64`).
 
-Capture root:
-`archfit-tool-upgrade-lab/2026-10-24-release/validation-image-arm64/contracts-integrated-11e84d11/`
-in the release coordinator's workspace. Its `image.json` records the local image;
-each case's `command.json` records the invocation.
+They were copied from the `release-image-contract-ubuntu-24.04-arm` artifact in
+[publisher run40172977752](https://github.com/alexei-led/archfit/actions/runs/40172977752).
+That artifact's `version.txt`, `image.json`, and per-case `command.json` record the
+producer and invocations. No candidate capture was relabeled or JSON tailored.
+The reports happen to be byte-identical to the earlier candidate regressions.
 
-| Fixture                   | Original path under capture root | SHA-256                                                            |
-| ------------------------- | -------------------------------- | ------------------------------------------------------------------ |
-| `missing-compiler.json`   | `compiler-negative/check.json`   | `acde9deda04172707184b6f61c10ee866ecc166aa4c94fb8f2e57f6b7274cce7` |
-| `optional-attention.json` | `go-65532/reanchored.json`       | `5200d5bcf764fcfed75fd427cae7720a67ff361824b4d134850112c5d11715e6` |
+| File | Original path under `contracts/` | SHA-256 |
+| --- | --- | --- |
+| `missing-compiler.json` | `compiler-negative/check.json` | `acde9deda04172707184b6f61c10ee866ecc166aa4c94fb8f2e57f6b7274cce7` |
+| `optional-attention.json` | `go-65532/reanchored.json` | `5200d5bcf764fcfed75fd427cae7720a67ff361824b4d134850112c5d11715e6` |
 
-The missing-compiler case ran as uid/gid `27182:27182`, with an empty read-only
-mount over `/opt/archfit/analyzers/node/node_modules/typescript`. It ran
-`archfit check --root /tmp/repo --config /tmp/repo/.archfit.yaml --json --quiet --refresh`
-and exited 2. The report records the dependency-cruiser compiler failure,
-`hard_gates: unmeasured`, and an unevaluated required rule.
+The missing-compiler case mounts an empty read-only TypeScript compiler directory.
+Its required import rule is unevaluated and hard gates are unmeasured.
+The optional-attention report follows a real capture/reanchor. Hard gates pass,
+no blockers or required gaps remain, and four dimensions are unknown.
+The producer omits the empty `unevaluated_required_rules` field.
 
-The optional-attention case ran as uid/gid `65532:65532`. After a genuine baseline
-capture and re-anchor in the same image, it ran
-`archfit check --root /tmp/repo --config /tmp/repo/.archfit.yaml --json --quiet`
-and exited 2. Its hard gates pass, there are no active blockers or unevaluated
-required rules, and four dimensions remain unknown. The producer omits the
-empty `unevaluated_required_rules` field (`omitempty`).
-
-Both captures used read-only trusted fixtures, a scratch `/tmp/repo`, no network,
-no-new-privileges, and all capabilities dropped. The regression tests replay
-these bytes **only through the shipped report stage**. Their facts/envelope
-wrapper is synthetic test transport metadata, not evidence that this Action
-executed or admitted that image. Deliberate malformed/contradictory test mutations
-are named as such and are not engine captures. Full legacy Action conformance
-continues to use the separate pinned v3.0.1 `ARCHFIT_TEST_STATE` document.
+Tests replay these bytes only through the shipped report stage. Facts/envelopes
+are synthetic transport wrappers, not executed identity or App approval proof.
+Malformed and contradictory mutations are negative tests, never engine captures.
+Full conformance uses the separate genuine release [state capture](../SOURCE.md).

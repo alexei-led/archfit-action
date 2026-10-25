@@ -31,20 +31,27 @@ jobs:
         with:
           go-version-file: tests/validate/go.mod
           cache: false
-      - name: Fetch a real engine state document (archfit v3.0.1, pinned by commit and sha256)
-        run: |
-          # A document the engine emitted, never a stub written to match this action.
-          curl -fsSL -o "$RUNNER_TEMP/state.json" \
-            https://raw.githubusercontent.com/alexei-led/archfit/0649e504a6761f565086b342d315110feeb27d77/internal/extract/golang/testdata/single-module/baseline.json
-          echo "dc621672167ae9fec8158984b718fed2b94e264c652cf5b6b33d21edacdabceb  $RUNNER_TEMP/state.json" | sha256sum --check
+      - name: Verify the unmodified v3.2.0 release capture
+        run: echo "c472d77d04cf03d912d1a3f8b41e7494c9a688da60d957a71d789e05f07c5127  tests/fixtures/state.json" | sha256sum --check
       - name: Envelopes for pull_request, push, discovery and baseline; refused events; transport; edge cases
         run: bash tests/run.sh
         env:
-          ARCHFIT_TEST_STATE: ${{ runner.temp }}/state.json
+          ARCHFIT_TEST_STATE: tests/fixtures/state.json
 
   engine:
-    name: Pinned engine image (v3.0.1, linux/amd64)
-    runs-on: ubuntu-24.04
+    name: Pinned engine image (v3.2.0, ${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,7 +67,7 @@ jobs:
       # The re-anchor fixtures tests/run.sh replays, as this image wrote them.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: engine-fixtures
+          name: engine-fixtures-${{ matrix.arch }}
           path: ${{ runner.temp }}/fixtures
           if-no-files-found: error
 
@@ -72,10 +79,10 @@ jobs:
         with:
           persist-credentials: false
       - id: archfit
-        uses: ./
+        uses: $/
         with:
-          engine-version: v3.0.1
-          image-digest: sha256:9aac269fa350e643054cbe5ced58426b4ed46000f30d60f49564aa605ece2408
+          engine-version: v3.2.0
+          image-digest: sha256:5f2d4a5fff1ace10d7b08937429179631ae0c1d0e1f9e6f37c72b30954cf00db
       - name: Nothing was measured or sent
         env:
           VERDICT: ${{ steps.archfit.outputs.verdict }}

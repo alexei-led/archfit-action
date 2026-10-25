@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the shipped report stage, not an engine or an App approval path.
-# SOURCE.md documents the genuine unreleased-candidate captures and their hashes.
+# SOURCE.md documents the genuine released-image captures and their hashes.
 # Facts are synthetic transport metadata; their envelope proves no executed identity.
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
@@ -20,8 +20,8 @@ report_case() { # NAME PAYLOAD EXPECTED_RC [ERROR]
 	jq -n --arg payload "$2" --arg verdict "$(jq -r '.verdict' "$2")" \
 		'{mode: "report", kind: "report", fork: false, payload_file: $payload, verdict: $verdict,
 		  event: "push", pull_request: 0, head_sha: ("1" * 40), base_sha: "", merge_base_sha: "",
-		  engine_version: "candidate-11e84d11", platform: "linux/arm64",
-		  image_digest: "sha256:c206455444ebae08fad47b2b3a4ff503e8b466f615bc4cf8a2a3c6d954302714",
+		  engine_version: "v3.2.0", platform: "linux/arm64",
+		  image_digest: "sha256:725c3a074358df8ea41881296eda06b07daed7934d7a6d40bb1ecfc3c8a8128d",
 		  baseline_digest: "", labels_digest: ""}' >"$case_dir/facts.json"
 	local rc=0
 	ARCHFIT_FACTS=$case_dir/facts.json bash "$root/scripts/report.sh" >"$case_dir/log" 2>&1 || rc=$?

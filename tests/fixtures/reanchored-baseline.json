@@ -31,7 +31,7 @@
     "rubric_version": "bc_score.v7",
     "measurement_profile": {
       "version": "archfit.measurement.v2",
-      "settings_hash": "272dcf8098b0dce3dbf0545c07a68aa89c8cac8493b335062628aa97178e3354",
+      "settings_hash": "516e929ad5505d837f97ea43acfeabf8169a65b7622b65b0a910e93fb8b1a1ff",
       "producers": [
         {
           "tool": "ast-grep",
@@ -40,7 +40,7 @@
         },
         {
           "tool": "ast-grep/syntax",
-          "semantics_version": "ast-grep/syntax.v1",
+          "semantics_version": "ast-grep/syntax.v2",
           "status": "disabled"
         },
         {
@@ -57,7 +57,7 @@
         {
           "tool": "go/packages",
           "semantics_version": "go/packages.v2",
-          "tool_version": "go1.26.9",
+          "tool_version": "go1.27.3",
           "status": "ok"
         },
         {
@@ -72,7 +72,7 @@
         },
         {
           "tool": "scip",
-          "semantics_version": "scip.v2",
+          "semantics_version": "scip.v3",
           "status": "disabled"
         }
       ],

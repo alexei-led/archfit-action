@@ -5,8 +5,23 @@
 # shellcheck disable=SC2016,SC2034,SC2154
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# ghcr.io/alexei-led/archfit v3.0.1, linux/amd64 manifest (index sha256:093eb483…e4aa).
-readonly ENGINE_DIGEST=sha256:9aac269fa350e643054cbe5ced58426b4ed46000f30d60f49564aa605ece2408
+# Released v3.2.0 platform manifests, verified against image-identity.json.
+readonly TEST_RUNNER_ARCH=${RUNNER_ARCH:-X64}
+case $TEST_RUNNER_ARCH in
+X64)
+	ENGINE_PLATFORM=linux/amd64
+	ENGINE_DIGEST=sha256:5f2d4a5fff1ace10d7b08937429179631ae0c1d0e1f9e6f37c72b30954cf00db
+	;;
+ARM64)
+	ENGINE_PLATFORM=linux/arm64
+	ENGINE_DIGEST=sha256:725c3a074358df8ea41881296eda06b07daed7934d7a6d40bb1ecfc3c8a8128d
+	;;
+*)
+	printf 'unsupported test runner: %s\n' "$TEST_RUNNER_ARCH" >&2
+	exit 1
+	;;
+esac
+readonly ENGINE_PLATFORM ENGINE_DIGEST
 passes=0 failures=0
 
 pass() {
@@ -100,8 +115,8 @@ new_case() {
 	: >"$GITHUB_OUTPUT"
 	: >"$GITHUB_STEP_SUMMARY"
 	export GITHUB_WORKSPACE=$case_dir/workspace GITHUB_REPOSITORY=acme/shop
-	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=X64
-	export ARCHFIT_ENGINE_VERSION=v3.0.1 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
+	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=$TEST_RUNNER_ARCH
+	export ARCHFIT_ENGINE_VERSION=v3.2.0 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
 	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
 		ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 }
