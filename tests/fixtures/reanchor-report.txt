@@ -5,3 +5,4 @@ re-anchor: kept 0 accepted entries, dropped 1, left 2 current finding(s) unaccep
   dropped: no_direct_b_dependency stale0000000000
   not accepted: bc/imbalanced_coupling 07af466df8bfd6e77ee485ac01c50a17 a -> b pkg/a/a.go
   not accepted: no_direct_b_dependency ba3803eca947bf3c1b7efa8f37854d5e a -> b pkg/a/a.go
+  metric reference not carried: encapsulation (current metric is unmeasured)

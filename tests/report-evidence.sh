@@ -20,8 +20,8 @@ report_case() { # NAME PAYLOAD EXPECTED_RC [ERROR]
 	jq -n --arg payload "$2" --arg verdict "$(jq -r '.verdict' "$2")" \
 		'{mode: "report", kind: "report", fork: false, payload_file: $payload, verdict: $verdict,
 		  event: "push", pull_request: 0, head_sha: ("1" * 40), base_sha: "", merge_base_sha: "",
-		  engine_version: "v3.2.0", platform: "linux/arm64",
-		  image_digest: "sha256:725c3a074358df8ea41881296eda06b07daed7934d7a6d40bb1ecfc3c8a8128d",
+		  engine_version: "v3.2.2", platform: "linux/arm64",
+		  image_digest: "sha256:e97a200a7c26907e4d30982b06e61ac7cc27bffd1d46002ad53bbf6b6594c479",
 		  baseline_digest: "", labels_digest: ""}' >"$case_dir/facts.json"
 	local rc=0
 	ARCHFIT_FACTS=$case_dir/facts.json bash "$root/scripts/report.sh" >"$case_dir/log" 2>&1 || rc=$?
