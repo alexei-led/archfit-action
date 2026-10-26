@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.2.1
+
+### Changed
+
+- Run only Engine v3.2.3 with its verified native platform manifests. Older engine
+  versions are refused before checkout.
+- Qualify genuine report, baseline and reanchor outputs from the published image.
+  The transport fixtures remain byte-identical to the prior captures.
+
+### Upgrade
+
+Update the Action commit, `engine-version: v3.2.3`, and matching platform digest
+together after the App approves that tuple. Do not substitute the multiarch index
+digest for the platform manifest.
+
+Envelope, upload, gate and trusted-input behavior are unchanged. This producer
+adoption does not require a policy or baseline reset; existing comparison and
+required-evidence checks still apply.
+
 ## v2.2.0
 
 ### Changed
