@@ -39,8 +39,8 @@ jobs:
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v3.2.2"
-          image-digest: "sha256:bd351ac70610555237974fac5ff914967a1100fb8ef754853151300d5d19ca35"
+          engine-version: "v3.2.3"
+          image-digest: "sha256:87323e8d80d519531338ff7a36ce750d337ecf6560e48493bdeb10b864e7b772"
           mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
 ```
 
@@ -116,7 +116,7 @@ baseline and reanchor (a reanchor also keeps the engine's report there).
 | --- | --- | --- |
 | `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v3.2.2`. An image that reports another version is refused. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v3.2.3`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
 | `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
 
@@ -340,7 +340,7 @@ shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
 
 `tests/run.sh` drives the shipped scripts on scratch repositories. Only process and
 network boundaries are faked. Its state and reanchor fixtures are unmodified outputs
-from the released v3.2.2 image. [Fixture provenance](tests/fixtures/SOURCE.md) records
+from the released v3.2.3 image. [Fixture provenance](tests/fixtures/SOURCE.md) records
 producer identity and byte hashes. The stored v3.0.0 baseline remains historical.
 
 `tests/report-evidence.sh` replays genuine release captures through the report stage,
