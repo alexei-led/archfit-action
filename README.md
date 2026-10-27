@@ -68,6 +68,27 @@ event before the checkout. `workflow_run` and `pull_request_target` run with the
 base repository's privileges on a commit the pull request author controls, and
 the App accepts none of these events.
 
+### Concurrency
+
+Pushes in quick succession would otherwise queue a stale run for each commit. A
+hand-written workflow can cancel the older pull request run when a new commit
+arrives:
+
+```yaml
+concurrency:
+  group: archfit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+The group is the pull request number, so runs of two pull requests never
+cancel each other, even when their branches share a name. Only pull request runs
+are cancelled. A cancelled run uploads nothing, and the App answers the newer
+head. A `push` to a branch and a dispatched baseline or reanchor on that branch
+share a group, and cancelling one of them would drop its upload, so they are
+never cancelled. A run waiting in the queue can still be replaced by a newer run
+in the same group. Dispatch a baseline or reanchor again when its run is
+replaced.
+
 ## Modes
 
 | Mode | Engine command | Payload | Sent to |
