@@ -125,12 +125,16 @@ event_file() { # TEMPLATE JQ-FILTER [JQ ARGS...]: write the case's event payload
 	jq "${@:3}" "$2" "$root/tests/events/$1.json" >"$case_dir/event.json"
 	export GITHUB_EVENT_PATH=$case_dir/event.json
 }
-on_pull_request() { # HEAD BASE [HEAD_REPO]
+on_pull_request() { # HEAD BASE [HEAD_REPO [MERGE]]
 	# GITHUB_SHA is the merge commit of a pull_request run; the action must never use it.
+	# With MERGE the event carries GitHub's test merge commit; without it GitHub reports a conflict.
 	export GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/42/merge \
 		GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
 	event_file pull_request '.pull_request.head.sha = $h | .pull_request.base.sha = $b
-		| .pull_request.head.repo.full_name = $r' --arg h "$1" --arg b "$2" --arg r "${3:-acme/shop}"
+		| .pull_request.head.repo.full_name = $r
+		| if $m == "" then .pull_request.mergeable = false
+		  else .pull_request.mergeable = true | .pull_request.merge_commit_sha = $m end' \
+		--arg h "$1" --arg b "$2" --arg r "${3:-acme/shop}" --arg m "${4:-}"
 }
 on_push() { # SHA
 	export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_SHA=$1

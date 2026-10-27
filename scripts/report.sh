@@ -3,8 +3,9 @@
 #
 # The envelope is the App's contract: archfit.report-envelope.v1, owned by archfit-app
 # (schema/ holds the vendored copy CI validates against). It states what was analysed:
-# repository, event, pull request, head, base and merge base, run, engine identity, and
-# the digests of the payload and of the baseline and labels files the engine read.
+# repository, event, pull request, head, base and merge base, the commit analysed and how
+# the pull request integrates (merged or conflicts), run, engine identity, and the
+# digests of the payload and of the baseline and labels files the engine read.
 # Every field is self-reported by a job that runs pull-request code. The App binds the
 # envelope to the OIDC token's claims and to GitHub's own data and trusts no field
 # alone: a matching envelope is necessary for an accepted report, never sufficient.
@@ -49,7 +50,7 @@ fi
 [[ -n $kind ]] || exit 0 # nothing was measured; run.sh said why
 [[ -f $payload ]] || die "payload $payload is missing"
 
-# envelope prints the 16 keys of archfit.report-envelope.v1 on one line, typed as the
+# envelope prints the 18 keys of archfit.report-envelope.v1 on one line, typed as the
 # App decodes them: integers for pull_request, run_id and run_attempt, sha256:-prefixed
 # payload and image digests, bare hex input digests ("" = the engine read no such file).
 envelope() {
@@ -63,7 +64,7 @@ envelope() {
 		--argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
 		--arg payload_digest "sha256:$digest" \
 		'{schema_version: "archfit.report-envelope.v1", kind, repository: $repository, event,
-		  pull_request, head_sha, base_sha, merge_base_sha,
+		  pull_request, head_sha, base_sha, merge_base_sha, analyzed_sha, integration,
 		  run_id: $run_id, run_attempt: $run_attempt,
 		  engine_version, image_digest, platform,
 		  payload_digest: $payload_digest, baseline_digest, labels_digest}' "$facts"

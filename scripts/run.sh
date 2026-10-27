@@ -27,9 +27,16 @@
 # git on the runner to execute later. Reports are read from the engine's stdout into
 # RUNNER_TEMP, outside every mount.
 #
-# Origin. On a pull request the check also runs with --base <merge base>: the engine
-# checks that commit out in a temporary worktree and marks every finding introduced,
-# pre_existing or unknown (comparison.origin_status, introduced_finding_ids). That is
+# Analysed commit. A pull request is analysed as it would land: the test merge commit
+# GitHub computed (pull_request.merge_commit_sha), or the head when GitHub reports
+# conflicts. The head stays the commit approval binds to; the merge commit must be the
+# merge of the event's base and head, else the run fails.
+#
+# Origin. On a pull request the check also runs with --base: the engine checks that
+# commit out in a temporary worktree and marks every finding introduced,
+# pre_existing or unknown (comparison.origin_status, introduced_finding_ids). The
+# commit is the event's base for a merge commit, which already holds the target's own
+# changes, and the merge base when the head is analysed. That is
 # report-only: the verdict and exit code are the head's alone. `git worktree add`
 # writes .git/worktrees/<name>, so for that run one empty RUNNER_TEMP directory is
 # mounted writable over /src/.git/worktrees; the rest of .git stays read-only, and
@@ -62,11 +69,11 @@ image=$ENGINE_IMAGE_REPO@$image_digest
 mkdir -p "$inputs" "$reference" "$bundle" "$out"
 : >"$work/inputs.tsv"
 
-head="" base_sha="" merge_base="" pull_request=0 fork=false input_tip=""
+head="" analysed="" integration="" base_sha="" merge_base="" origin_base="" pull_request=0 fork=false input_tip=""
 engine_version="" platform="" verdict="" payload="" kind="" artifact="" report_file="" origin=""
 
 resolve_revisions() {
-	local base_ref head_repo checked_out
+	local base_ref head_repo checked_out commits
 	case $event in
 	pull_request)
 		head=$(event_field .pull_request.head.sha)
@@ -90,14 +97,33 @@ resolve_revisions() {
 			die "$base_sha and $head have more than one merge base ($(tr '\n' ' ' <<<"$merge_base")); merge the base branch into the pull request so one merge base remains, then push"
 		input_tip=$(git -C "$src" rev-parse --verify --quiet "refs/remotes/origin/$base_ref^{commit}") ||
 			die "the base branch $base_ref was not fetched"
+		commits=$(pull_request_commits) || die "the pull_request event names no merge commit and does not report a conflict"
+		read -r integration analysed <<<"$commits"
+		if [[ $integration == merged ]]; then
+			assert_merge_of "$analysed" "$base_sha" "$head"
+			origin_base=$base_sha
+		else
+			origin_base=$merge_base
+		fi
 		;;
 	*)
 		head=${GITHUB_SHA:?}
+		analysed=$head
 		input_tip=$head
 		;;
 	esac
 	checked_out=$(git -C "$src" rev-parse HEAD)
-	[[ $checked_out == "$head" ]] || die "the checkout is at $checked_out, not at the analysed commit $head"
+	[[ $checked_out == "$analysed" ]] || die "the checkout is at $checked_out, not at the analysed commit $analysed"
+}
+
+# assert_merge_of COMMIT BASE HEAD: the test merge commit has exactly the event's base
+# and head as parents. GitHub recomputes it when the target moves; a commit built on
+# another base would be analysed against inputs and an origin that do not match it.
+assert_merge_of() {
+	local parents
+	parents=$(git -C "$src" rev-list --parents -n 1 "$1") || die "cannot read the merge commit $1"
+	[[ $parents == "$1 $2 $3" ]] ||
+		die "the merge commit $1 does not merge the event's base $2 and head $3 (parents: ${parents#"$1"}); the target moved since the event, so push or re-run the pull request"
 }
 
 # Git config keys that carry or route credentials: auth headers, credential helpers,
@@ -271,7 +297,7 @@ check() {
 			;;
 		*)
 			show_engine_log
-			warning "the comparison with the merge base $base ended without a report (archfit exit $rc); origin is missing for this run. Running the check again without --base."
+			warning "the comparison with $base ended without a report (archfit exit $rc); origin is missing for this run. Running the check again without --base."
 			origin="missing (the comparison with the merge base failed; see the log)"
 			# The first run could write /bundle, including a baseline where none is mounted.
 			# The engine reads its baseline before analysis, so one run cannot plant its own;
@@ -357,6 +383,7 @@ write_facts() {
 	jq -n \
 		--arg mode "$mode" --arg kind "$kind" --arg event "$event" \
 		--arg head_sha "$head" --arg base_sha "$base_sha" --arg merge_base_sha "$merge_base" \
+		--arg analyzed_sha "$analysed" --arg integration "$integration" \
 		--argjson pull_request "$pull_request" --argjson fork "$fork" \
 		--arg engine_version "$engine_version" --arg image_digest "$image_digest" --arg platform "$platform" \
 		--arg baseline_digest "$(digest_of .archfit-baseline.json)" \
@@ -365,6 +392,7 @@ write_facts() {
 		--rawfile inputs "$work/inputs.tsv" \
 		'{mode: $mode, kind: $kind, event: $event,
 		  head_sha: $head_sha, base_sha: $base_sha, merge_base_sha: $merge_base_sha,
+		  analyzed_sha: $analyzed_sha, integration: $integration,
 		  pull_request: $pull_request, fork: $fork,
 		  engine_version: $engine_version, image_digest: $image_digest, platform: $platform,
 		  baseline_digest: $baseline_digest, labels_digest: $labels_digest,
@@ -380,14 +408,20 @@ write_facts() {
 }
 
 write_summary() {
-	local analysed="\`$head\` ($event)"
-	[[ $event != pull_request ]] ||
-		analysed="\`$head\` (pull request #$pull_request, merge base \`$merge_base\`)"
+	local what="\`$head\` ($event)"
+	if [[ $event == pull_request ]]; then
+		what="\`$head\` (pull request #$pull_request, merge base \`$merge_base\`)"
+		if [[ $integration == merged ]]; then
+			what="merge commit \`$analysed\` of \`$head\` into \`$base_sha\` (pull request #$pull_request)"
+		else
+			what="$what, analysed alone: the pull request conflicts with its base"
+		fi
+	fi
 	summary "### archfit $mode" "" \
-		"- Analysed: $analysed" \
+		"- Analysed: $what" \
 		"- Engine: $engine_version, $platform, \`$image_digest\`" \
 		"- Verdict: ${verdict:-none}"
-	[[ -z $origin ]] || summary "- Origin against the merge base: $origin"
+	[[ -z $origin ]] || summary "- Origin against the base: $origin"
 	summary ""
 	[[ -s $work/inputs.tsv ]] || return 0
 	summary "| Trusted input | From | Commit | SHA-256 |" "| --- | --- | --- | --- |"
@@ -418,8 +452,8 @@ report)
 	fi
 	engine_identity
 	payload=$out/archfit-state.json
-	# merge_base is empty off pull requests, so push runs measure the commit alone.
-	check "$payload" "$merge_base"
+	# origin_base is empty off pull requests, so push runs measure the commit alone.
+	check "$payload" "$origin_base"
 	kind=report artifact=archfit-report
 	;;
 discovery)

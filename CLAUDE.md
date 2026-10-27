@@ -43,10 +43,16 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   the input digests are claims the App compares with its manifest and the protected
   ref. Never word one as an attestation.
 - **The analysed commit comes from the event payload, never from the job context.** A
-  `pull_request` job's `GITHUB_SHA` is a merge commit. `base_sha` is the event's
-  `pull_request.base.sha` (the App compares it with the API's `base.sha`);
+  pull request is analysed as it would land: `analyzed_sha` is
+  `pull_request.merge_commit_sha`, the test merge commit (`integration: merged`), whose
+  parents must be exactly `base_sha` and head or the run fails. When the event says
+  `mergeable: false` the head is analysed alone (`integration: conflicts`, even if a
+  stale merge commit is present); neither known yet fails the job before the checkout.
+  `head_sha` stays the event's head, the commit approval binds to. `base_sha` is the
+  event's `pull_request.base.sha` (the App compares it with the API's `base.sha`);
   `merge_base_sha` is the single `git merge-base --all` of that and head (several =
-  criss-cross, refused).
+  criss-cross, refused). Off pull requests `analyzed_sha` is `head_sha` and
+  `integration` is "".
 - **Trusted inputs come from git blobs, per file.** On a pull request reported to the
   App a file comes from head when merge-base..head changes it, else from the base tip.
   Without an endpoint nobody checks owner approval, so every file comes from the base
@@ -69,7 +75,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   is never its input. The working tree is writable for target build tools and indexers. Payloads are read from stdout into `RUNNER_TEMP`,
   outside every mount.
 - **Origin is report-only, and its one git write is fenced.** A pull request report runs
-  `check --base <merge_base>`; push, dispatch and the baseline self-checks do not. For
+  `check --base <base_sha>` on a merge commit (it already holds the target's changes)
+  and `--base <merge_base>` when the head is analysed alone; push, dispatch and the baseline self-checks do not. For
   that run only, an empty `RUNNER_TEMP` directory is mounted writable over
   `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
   the host directory is a mountpoint created beforehand). After the container exits,

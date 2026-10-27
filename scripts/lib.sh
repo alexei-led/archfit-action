@@ -48,6 +48,25 @@ is_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 # event_field FILTER prints a field of the event payload, or nothing when it is absent.
 event_field() { jq -r "$1 // empty" "${GITHUB_EVENT_PATH:?}"; }
 
+# pull_request_commits prints "merged MERGE" when GitHub computed the test merge commit
+# of the pull request, or "conflicts HEAD" when it reports the pull request as not
+# mergeable (no merge commit; the head is analysed). It fails when GitHub has computed
+# neither yet: the run cannot tell which commit to analyse. mergeable is read raw,
+# because `// empty` would turn false into nothing.
+pull_request_commits() {
+	local merge mergeable
+	merge=$(event_field .pull_request.merge_commit_sha)
+	mergeable=$(jq -r '.pull_request.mergeable | tostring' "${GITHUB_EVENT_PATH:?}")
+	# A conflicting pull request can still carry the merge commit of an earlier state.
+	if [[ $mergeable == false ]]; then
+		printf 'conflicts %s\n' "$(event_field .pull_request.head.sha)"
+	elif is_sha "$merge"; then
+		printf 'merged %s\n' "$merge"
+	else
+		return 1
+	fi
+}
+
 # work_dir holds this run's bundle, payload and envelope: under RUNNER_TEMP, outside
 # the checkout that the engine container sees.
 work_dir() { printf '%s/archfit' "${RUNNER_TEMP:?RUNNER_TEMP is not set}"; }

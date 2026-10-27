@@ -93,7 +93,7 @@ replaced.
 
 | Mode | Engine command | Payload | Sent to |
 | --- | --- | --- | --- |
-| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src`, plus `--base <merge base>` on a pull request | state report | `<endpoint>/v1/reports` |
+| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src`, plus `--base <base>` on a pull request | state report | `<endpoint>/v1/reports` |
 | `discovery` | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
 | `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
 | `reanchor` | `baseline --reanchor --from /reference/.archfit-baseline.json -c /bundle/.archfit.yaml --root /src`, then `check` | the new `.archfit-baseline.json` | `<endpoint>/v1/reanchors`; artifact only without `endpoint` |
@@ -180,20 +180,23 @@ mounts it read-only:
 
 ## Origin on pull requests
 
-On a `pull_request` run, the report check runs with `--base <merge base>`. The
-engine checks the merge base out in a temporary worktree and scores it with the
-same trusted inputs. Then it marks each finding of the head:
+On a `pull_request` run, the report check runs with `--base <base>`. The engine
+checks that commit out in a temporary worktree and scores it with the same
+trusted inputs. Then it marks each finding of the analysed commit. The base is the
+event's base commit when the merge commit is analysed (it already holds the
+target's own changes, so only the pull request's findings count as introduced),
+and the merge base when the head is analysed alone:
 
 - `findings[].origin` and `agent_tasks[].origin`: `introduced` (the pull request
-  added it), `pre_existing` (the merge base has it too), or `unknown` (the
+  added it), `pre_existing` (the base has it too), or `unknown` (the
   analyzer evidence of the two sides did not pair);
 - `comparison.origin_status` (`comparable` or `unknown`) and
   `comparison.origin_reasons`;
 - `comparison.introduced_finding_ids` and `comparison.resolved_finding_ids`.
 
 The step summary gives the origin status and the two counts. Origin is
-report-only: the verdict and the exit code are the head's alone. `push` runs
-have no base and no origin fields.
+report-only: the verdict and the exit code are those of the analysed commit
+alone. `push` runs have no base and no origin fields.
 
 Cost: one `--base` run analyses both trees, so a pull request run takes about
 two engine passes of time.
@@ -211,7 +214,7 @@ bounded by the job's `timeout-minutes`, like any engine run.
 
 ## The envelope
 
-The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 16 flat
+The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 18 flat
 typed keys. [`schema/`](schema/) holds the vendored copy, and
 [`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
 sha256. CI validates the envelopes the action builds for `pull_request` and
@@ -220,10 +223,18 @@ Checking that the vendored bytes still equal the App's schema belongs in the App
 CI.
 
 The envelope states what was analysed: repository, event, pull request, head,
-base and merge base, run, engine identity, and the digests of the payload and of
-the baseline and labels files the engine read. Head, base and pull request come
-from the event payload, never from the job context: a `pull_request` job's
-`GITHUB_SHA` is a merge commit.
+base and merge base, the commit analysed and how the pull request integrates,
+run, engine identity, and the digests of the payload and of the baseline and
+labels files the engine read. Head, base, merge commit and pull request come
+from the event payload, never from the job context.
+
+`head_sha` is the pull request head, the commit an owner approves.
+`analyzed_sha` is the commit the engine measured: GitHub's test merge commit of
+the head into the base (`integration: merged`), whose parents must be the
+event's base and head, or the head itself when GitHub reports the pull request
+as conflicting (`integration: conflicts`). When GitHub has computed neither yet
+(`mergeable` is null), the job fails before the checkout; run it again. Off pull
+requests `analyzed_sha` equals `head_sha` and `integration` is empty.
 
 It is **not** a security claim. Every field is self-reported by a job that runs
 pull-request code. The App binds the envelope to the OIDC token's claims and to
