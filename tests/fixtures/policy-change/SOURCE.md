@@ -2,9 +2,10 @@
 
 `widen.json`, `addrule.json` and `exclude.json` are `archfit config compare --json`
 output (`archfit.config-compare.v1`) from the engine at commit
-`873ddb1c19350d2c42114f368deef3c40200e26a` (feat/agent-gate-e11, not yet on main),
-built from source with `go build ./cmd/archfit` and run on this repository's
-synthetic Go module (`pkg/a` imports `pkg/b`). Nothing was edited.
+`feec08c3` (main, E11 merged as PR #110), built from source with `go build ./cmd/archfit`
+and run on this repository's synthetic Go module (`pkg/a` imports `pkg/b`). Nothing
+was edited. The branch build (873ddb1c) printed the same classification without the
+`declarations_changed` list and the `supplied-coverage` entry, which the final shape adds.
 
 - `base.yaml` is the current policy, `base-none.yaml` the same with `depends_on: []`
   for module `a`. `widen.candidate.yaml` widens `a`'s allowlist to `[b]`;
@@ -13,9 +14,8 @@ synthetic Go module (`pkg/a` imports `pkg/b`). Nothing was edited.
 - Command: `archfit config compare <candidate> -c <current> --root <repo> --json`,
   with the current file for `widen` being `base-none.yaml`.
 - sha256:
-  - `widen.json` 9aea3e86b3f328b25f5bbbd2d3c0b426fe61b3525b0a22685cc115d54667bd59
-  - `addrule.json` d4e571f062391133f00b778afae7d5df68463760bb453f1e74b40d92f770a43c
-  - `exclude.json` 5ff02496dfb96ca4a5bead12e68257b0dfccffc337abcb9ad7883c27a1aff373
+  - `widen.json` 79a08107a657c97abb7f64127f9738321ff0b3f3578637c21bd818971f29a621
+  - `addrule.json` bb069ce1c27741fae5a259a3cc57202b841ffd1fc4dbed9029a971f9e87feabf
+  - `exclude.json` 91c51bce25d403a3d6495eb626c919f4d5aa3f10b6aae9031fee90af128a502e
 
-Re-capture from the engine's merged v3.4.0 image before the release, and update the
-hashes here.
+Re-capture from the published v3.4.0 image before the release, and update the hashes here.

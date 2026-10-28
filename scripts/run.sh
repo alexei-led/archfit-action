@@ -431,12 +431,17 @@ blob_at() {
 # before the engine container, so no git runs on the runner after a container has run. The
 # candidate is the head's file and the current the base tip's, and only when the pull
 # request itself changes the policy: merge base..head decides, as materialize does for
-# every trusted input. Off that, nothing is classified.
+# every trusted input. Off that, nothing is classified. The engine's comparison measures
+# both configurations in full, so it runs only where the engine prints the section.
 prepare_policy_change() {
 	local current=$work/policy-current candidate=$work/policy-candidate head_blob base_blob
 	policy_change_ready=false
 	[[ $event == pull_request ]] || return 0
 	if git -C "$src" diff --quiet --no-ext-diff "$merge_base" "$head" -- .archfit.yaml; then
+		return 0
+	fi
+	if [[ $pinned_version != "$POLICY_CHANGE_FROM" ]]; then
+		policy_change_status="not classified: the pinned engine $pinned_version does not classify policy changes; the classification starts with $POLICY_CHANGE_FROM"
 		return 0
 	fi
 	base_blob=$(blob_at "$input_tip" .archfit.yaml)
@@ -485,7 +490,7 @@ classify_policy_change() {
 		return 0
 	fi
 	policy_change_status=$(jq -r '.policy_change as $c
-		| "\($c.direction): loosens \(($c.rules_removed + $c.rules_loosened + $c.waivers_added + $c.allowlists_widened) | length), tightens \(($c.rules_added + $c.rules_tightened + $c.waivers_removed + $c.allowlists_narrowed) | length), coverage lost \($c.coverage_lost | length)"' \
+		| "\($c.direction): loosens \(($c.rules_removed + $c.rules_loosened + $c.waivers_added + $c.allowlists_widened + $c.declarations_changed) | length), tightens \(($c.rules_added + $c.rules_tightened + $c.waivers_removed + $c.allowlists_narrowed + $c.coverage_gained) | length), coverage lost \($c.coverage_lost | length)"' \
 		"$out/policy-change.json")
 }
 

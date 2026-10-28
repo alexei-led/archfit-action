@@ -324,6 +324,13 @@
         "candidate": "disabled",
         "status": "comparable_with_gaps",
         "reason": "analyzer disabled under both configurations"
+      },
+      {
+        "tool": "supplied-coverage",
+        "current": "disabled",
+        "candidate": "disabled",
+        "status": "comparable_with_gaps",
+        "reason": "analyzer disabled under both configurations"
       }
     ]
   },
@@ -345,6 +352,7 @@
     "rules_tightened": [],
     "waivers_removed": [],
     "allowlists_narrowed": [],
-    "coverage_gained": []
+    "coverage_gained": [],
+    "declarations_changed": []
   }
 }

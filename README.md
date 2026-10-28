@@ -216,9 +216,10 @@ bounded by the job's `timeout-minutes`, like any engine run.
 
 When a pull request changes `.archfit.yaml`, the action asks the engine what the
 change does to what blocks: `archfit config compare <head policy> -c <base policy>
---json` (`archfit.config-compare.v1`). The engine classifies the two files'
-declarations and measures nothing new. The head's file is the candidate, because
-it is what an owner would approve; the base tip's file is the current policy.
+--json` (`archfit.config-compare.v1`). The head's file is the candidate, because it
+is what an owner would approve; the base tip's file is the current policy. The
+classification reads the two files' declarations. The comparison around it still
+measures the tree under both policies, so it takes as long as two analyses.
 
 The document is kept as the `archfit-policy-change` artifact, byte for byte as the
 engine printed it, and the step summary gives its direction and counts:
@@ -228,9 +229,9 @@ engine printed it, and the step summary gives its direction and counts:
 - `coverage lost`: source that is no longer measured (an exclude added, a language
   or analyzer turned off, a module or its paths removed).
 
-Engine v3.2.3 prints no classification; the summary then says the engine does not
-classify policy changes, and the artifact holds the comparison alone. The engine
-version that classifies is the one the action pins; see the release notes.
+The action runs the comparison only with an engine that prints the classification:
+v3.4.0 and later. With the pinned v3.2.3 it does not run, and the summary says so.
+The release that moves the pin to v3.4.0 turns it on.
 
 This section is report-only. A failed classification is a warning, the verdict and
 the exit code are unchanged, and nothing is sent to the App: the App's policy
