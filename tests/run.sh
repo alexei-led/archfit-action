@@ -66,6 +66,10 @@ git -C "$origin" checkout --quiet -b drop "$c1"
 git -C "$origin" rm --quiet .archfit.yaml
 commit_all "$origin" "drop: delete the policy"
 d1=$(git -C "$origin" rev-parse HEAD)
+# m2 is the test merge commit GitHub computes for feature (f1) into main (c2): parents c2, f1.
+git -C "$origin" checkout --quiet -b merge-f1 "$c2"
+git -C "$origin" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "merge f1 into c2" "$f1"
+m2=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet main
 
 # Criss-cross: x2 and y2 each merge the other's first commit, so they have two merge bases.
@@ -163,8 +167,8 @@ expect_eq "schema/envelope.v1.schema.json sha256" \
 
 # --- Envelopes per event, produced by the shipped scripts ----------------------------
 
-begin "pull_request report: per-file trusted inputs, envelope and upload"
-on_pull_request "$f1" "$c1"
+begin "pull_request report: the merge result is analysed, per-file trusted inputs, envelope and upload"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
@@ -175,8 +179,13 @@ expect_eq "kind" report "$(envelope_field kind)"
 expect_eq "event" pull_request "$(envelope_field event)"
 expect_eq "pull request number" 42 "$(envelope_field pull_request)"
 expect_eq "head_sha is the pull request head, not GITHUB_SHA" "$f1" "$(envelope_field head_sha)"
-expect_eq "base_sha is the event's base.sha" "$c1" "$(envelope_field base_sha)"
+expect_eq "base_sha is the event's base.sha" "$c2" "$(envelope_field base_sha)"
 expect_eq "merge_base_sha" "$c1" "$(envelope_field merge_base_sha)"
+expect_eq "analyzed_sha is the test merge commit" "$m2" "$(envelope_field analyzed_sha)"
+expect_eq "integration" merged "$(envelope_field integration)"
+expect_eq "the checkout is the merge commit" "$m2" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+expect "the merge holds the pull request's change" grep -q 'Twice' "$GITHUB_WORKSPACE/pkg/a/a.go"
+expect "the merge holds the target's change" grep -q 'moved on main' "$GITHUB_WORKSPACE/.archfit-labels.yaml"
 expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
 expect_eq "engine identity" "v3.2.3 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
@@ -225,9 +234,9 @@ expect "/bundle itself is a separate, empty writable directory" json_ok \
 expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
-expect "engine arguments: the check compares with the merge base" json_ok \
+expect "engine arguments: the check compares with the event's base, which the merge commit contains" json_ok \
 	'.args == ["check", "--json", "--refresh", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
-	"$check_call" --arg m "$c1"
+	"$check_call" --arg m "$c2"
 expect_eq "one engine pass reports both sides" 1 "$(jq -s 'map(select(.command == "run" and .args[0] == "check")) | length' "$FAKE_DOCKER_LOG")"
 expect "the payload carries the origin of every finding" \
 	jq -e '.comparison.origin_status == "comparable" and (.comparison.introduced_finding_ids | length) == 1
@@ -237,7 +246,8 @@ expect "only .git/worktrees is writable inside .git, from an empty RUNNER_TEMP d
 	"$options" --arg s "$GITHUB_WORKSPACE" --arg w "$RUNNER_TEMP/archfit/git-worktrees"
 expect "nothing of the base worktree is left in the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
 expect "the host .git/worktrees is an empty mountpoint" test -z "$(ls -A "$GITHUB_WORKSPACE/.git/worktrees")"
-expect "the step summary gives the origin counts" summary_has "Origin against the merge base: comparable, introduced 1, resolved 0"
+expect "the step summary gives the origin counts" summary_has "Origin against the base: comparable, introduced 1, resolved 0"
+expect "the step summary names the merge commit" summary_has "merge commit \`$m2\`"
 
 begin "push report: trusted inputs from the pushed commit"
 on_push "$c2"
@@ -248,6 +258,8 @@ expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-
 expect_eq "pull_request, base and merge base are empty off pull requests" "0||" \
 	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
 expect_eq "head_sha is the pushed commit" "$c2" "$(envelope_field head_sha)"
+expect_eq "analyzed_sha is the pushed commit, integration is empty" "$c2|" \
+	"$(envelope_field analyzed_sha)|$(envelope_field integration)"
 expect_eq "the policy comes from the pushed commit" \
 	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
 expect "no base comparison off pull requests" json_ok \
@@ -332,6 +344,71 @@ expect_eq "baseline and labels digests are empty" "|" \
 expect "the capture read no labels" json_ok '.bundle | keys == [".archfit.yaml"]' "$(engine_call baseline)"
 expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
 
+# --- Pull request integration: the merge commit, a conflict, a state GitHub has not computed ---
+
+begin "pull request the event reports as conflicting: the head is analysed alone"
+# Even when the job's GITHUB_SHA is a valid merge commit, the event's word wins.
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+jq '.pull_request.mergeable = false' "$GITHUB_EVENT_PATH" >"$case_dir/conflict.json"
+export GITHUB_EVENT_PATH=$case_dir/conflict.json
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "head_sha and analyzed_sha are the head" "$f1 $f1" "$(envelope_field head_sha) $(envelope_field analyzed_sha)"
+expect_eq "integration" conflicts "$(envelope_field integration)"
+expect_eq "the checkout is the head" "$f1" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+expect "origin compares with the merge base, not the target tip" json_ok \
+	'.args[-2:] == ["--base", $m]' "$(engine_call check)" --arg m "$c1"
+expect "the step summary says the pull request conflicts" summary_has "analysed alone: the pull request conflicts with its base"
+
+begin "event whose mergeable and merge_commit_sha GitHub has not filled in yet: the run's merge commit is used"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+jq '.pull_request.mergeable = null | .pull_request.merge_commit_sha = null' "$GITHUB_EVENT_PATH" >"$case_dir/pending.json"
+export GITHUB_EVENT_PATH=$case_dir/pending.json
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "analyzed_sha is the run's merge commit" "$m2 merged" "$(envelope_field analyzed_sha) $(envelope_field integration)"
+
+begin "event with a stale merge_commit_sha: the payload field is not trusted"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+jq --arg s "$c1" '.pull_request.merge_commit_sha = $s' "$GITHUB_EVENT_PATH" >"$case_dir/stale.json"
+export GITHUB_EVENT_PATH=$case_dir/stale.json
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "analyzed_sha is the run's merge commit" "$m2" "$(envelope_field analyzed_sha)"
+
+begin "pull_request run whose ref is not a merge ref: refused before the checkout"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+export GITHUB_REF=refs/heads/feature
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says there is no merge commit" log_has "has no merge commit to analyse"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
+begin "merge commit of another base: refused, nothing analysed"
+# The event names c1 as the base, but m2 merges c2: its inputs and origin would not match.
+on_pull_request "$f1" "$c1" acme/shop "$m2"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the parents" log_has "does not merge the event's base $c1 and head $f1"
+expect_eq "no engine run" 0 "$(engine_calls)"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "merge commit that is not a merge: refused"
+on_pull_request "$f1" "$c1" acme/shop "$f1"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the parents" log_has "does not merge the event's base"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
 # --- Events the App does not accept: refused before the checkout ----------------------
 
 for refused in workflow_run pull_request_target merge_group; do
@@ -399,7 +476,7 @@ for base_rc in 3 137; do
 	expect "the log says origin is missing for this run" log_has "origin is missing for this run"
 	expect "the log shows the engine's reason" log_has "git worktree add exited 128"
 	expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
-	expect "the step summary says origin is missing" summary_has "Origin against the merge base: missing"
+	expect "the step summary says origin is missing" summary_has "Origin against the base: missing"
 	expect "the left-over worktree is removed from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
 	expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 	expect_eq "the report is uploaded" 1 "$(requests upload)"
@@ -487,6 +564,17 @@ mutate baseline-with-baseline-digest '.baseline_digest = ("5b" * 32)' "$tmp/base
 mutate baseline-with-pull-request '.pull_request = 42' "$tmp/baseline.envelope"
 mutate baseline-with-base-sha ".base_sha = \"$c1\"" "$tmp/baseline.envelope"
 mutate baseline-with-prefixed-labels-digest '.labels_digest = "sha256:" + .labels_digest' "$tmp/baseline.envelope"
+mutate missing-analyzed-sha 'del(.analyzed_sha)'
+mutate missing-integration 'del(.integration)'
+mutate empty-analyzed-sha '.analyzed_sha = ""'
+mutate short-analyzed-sha '.analyzed_sha |= .[0:39]'
+mutate uppercase-analyzed-sha '.analyzed_sha |= ascii_upcase'
+mutate unknown-integration '.integration = "rebased"'
+mutate pull-request-without-integration '.integration = ""'
+mutate baseline-with-integration '.integration = "merged"' "$tmp/baseline.envelope"
+mutate baseline-without-analyzed-sha '.analyzed_sha = ""' "$tmp/baseline.envelope"
+jq -cj '.integration = "conflicts" | .analyzed_sha = .head_sha' "$reference" >"$case_dir/conflicts.envelope"
+expect "a conflicting pull request's envelope is valid" valid_envelope "$case_dir/conflicts.envelope" ""
 edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
 edit fraction-attempt '"run_attempt":1,' '"run_attempt":1.0,'
 edit duplicate-key '"labels_digest"' "\"head_sha\":\"$f1\",\"labels_digest\""

@@ -42,11 +42,18 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   self-reported. The identity fields (`engine_version`, `image_digest`, `platform`) and
   the input digests are claims the App compares with its manifest and the protected
   ref. Never word one as an attestation.
-- **The analysed commit comes from the event payload, never from the job context.** A
-  `pull_request` job's `GITHUB_SHA` is a merge commit. `base_sha` is the event's
-  `pull_request.base.sha` (the App compares it with the API's `base.sha`);
+- **The analysed commit is tied to the event payload; the job context only locates it.**
+  A pull request is analysed as it would land: `analyzed_sha` is the run's test merge
+  commit (`integration: merged`), found as `GITHUB_SHA` on `refs/pull/N/merge` and
+  accepted only when its parents are exactly the event's `base.sha` and head, else the
+  run fails. The event's own `merge_commit_sha` and `mergeable` are filled in by GitHub
+  after the event is sent and are often null, so only `mergeable: false` is read from
+  them: the head is then analysed alone (`integration: conflicts`). `head_sha` stays
+  the event's head, the commit approval binds to. `base_sha` is the
+  event's `pull_request.base.sha` (the App compares it with the API's `base.sha`);
   `merge_base_sha` is the single `git merge-base --all` of that and head (several =
-  criss-cross, refused).
+  criss-cross, refused). Off pull requests `analyzed_sha` is `head_sha` and
+  `integration` is "".
 - **Trusted inputs come from git blobs, per file.** On a pull request reported to the
   App a file comes from head when merge-base..head changes it, else from the base tip.
   Without an endpoint nobody checks owner approval, so every file comes from the base
@@ -69,7 +76,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   is never its input. The working tree is writable for target build tools and indexers. Payloads are read from stdout into `RUNNER_TEMP`,
   outside every mount.
 - **Origin is report-only, and its one git write is fenced.** A pull request report runs
-  `check --base <merge_base>`; push, dispatch and the baseline self-checks do not. For
+  `check --base <base_sha>` on a merge commit (it already holds the target's changes)
+  and `--base <merge_base>` when the head is analysed alone; push, dispatch and the baseline self-checks do not. For
   that run only, an empty `RUNNER_TEMP` directory is mounted writable over
   `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
   the host directory is a mountpoint created beforehand). After the container exits,
