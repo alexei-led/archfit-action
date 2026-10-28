@@ -31,15 +31,15 @@ jobs:
         with:
           go-version-file: tests/validate/go.mod
           cache: false
-      - name: Verify the unmodified v3.2.3 release capture
-        run: echo "c472d77d04cf03d912d1a3f8b41e7494c9a688da60d957a71d789e05f07c5127  tests/fixtures/state.json" | sha256sum --check
+      - name: Verify the unmodified v3.4.0 release capture
+        run: echo "958a3de5c00bd41d8221a58381c6f30653ba1ae114f285ec34401954509c5d34  tests/fixtures/state.json" | sha256sum --check
       - name: Envelopes for pull_request, push, discovery and baseline; refused events; transport; edge cases
         run: bash tests/run.sh
         env:
           ARCHFIT_TEST_STATE: tests/fixtures/state.json
 
   engine:
-    name: Pinned engine image (v3.2.3, ${{ matrix.platform }})
+    name: Pinned engine image (v3.4.0, ${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -81,8 +81,8 @@ jobs:
       - id: archfit
         uses: ./
         with:
-          engine-version: v3.2.3
-          image-digest: sha256:87323e8d80d519531338ff7a36ce750d337ecf6560e48493bdeb10b864e7b772
+          engine-version: v3.4.0
+          image-digest: sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
       - name: Nothing was measured or sent
         env:
           VERDICT: ${{ steps.archfit.outputs.verdict }}

@@ -8,7 +8,7 @@
 #   FAKE_DOCKER_LOG           JSON lines, one per call (required)
 #   FAKE_STATE                document that `check` prints
 #   FAKE_DRAFT                document that `config init` prints
-#   FAKE_ENGINE_VERSION       version that `--version` reports (default v3.2.3)
+#   FAKE_ENGINE_VERSION       version that `--version` reports (default v3.4.0)
 #   FAKE_PLATFORM             os/arch that `image inspect` reports (default linux/amd64)
 #   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
 #                             and 3 prints no report, as the engine does
@@ -22,7 +22,7 @@
 #                             /bundle/.archfit-baseline.json, as analysed code can
 #   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
 #   FAKE_COMPARE              file that `config compare` prints (default: tests/fixtures/policy-change/widen.json)
-#   FAKE_COMPARE_V32          true removes policy_change, as engine v3.2.3 prints
+#   FAKE_COMPARE_NO_SECTION   true removes policy_change from the document
 #   FAKE_COMPARE_RC           exit code of `config compare` (default 0); non-zero prints an engine reason on stderr
 #   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees,
 #                             and a failed `check --base` makes /bundle read-only after its plant
@@ -114,7 +114,7 @@ record --arg image "$image" --argjson bundle "$seen" --arg reference "$reference
 
 case ${1:-} in
 --version)
-	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v3.2.3}"
+	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v3.4.0}"
 	;;
 check)
 	if ! jq -e 'has(".archfit.yaml")' <<<"$seen" >/dev/null; then
@@ -172,7 +172,7 @@ config)
 			echo "error: candidate config: decode failed" >&2
 			exit "$FAKE_COMPARE_RC"
 		fi
-		if [[ ${FAKE_COMPARE_V32:-} == true ]]; then
+		if [[ ${FAKE_COMPARE_NO_SECTION:-} == true ]]; then
 			jq 'del(.policy_change)' "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"
 		else
 			cat "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"

@@ -112,7 +112,7 @@ begin() { # NAME
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_COMPARE FAKE_COMPARE_RC FAKE_COMPARE_V32 FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
+	unset FAKE_COMPARE FAKE_COMPARE_RC FAKE_COMPARE_NO_SECTION FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
 		FAKE_BASE_RC FAKE_BASE_SYMLINK FAKE_BASE_LOCKED
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
@@ -187,7 +187,7 @@ expect_eq "the checkout is the merge commit" "$m2" "$(git -C "$GITHUB_WORKSPACE"
 expect "the merge holds the pull request's change" grep -q 'Twice' "$GITHUB_WORKSPACE/pkg/a/a.go"
 expect "the merge holds the target's change" grep -q 'moved on main' "$GITHUB_WORKSPACE/.archfit-labels.yaml"
 expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
-expect_eq "engine identity" "v3.2.3 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.4.0 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 check_call=$(engine_call check)
 expect_eq "the engine reads the policy the pull request changes from its head" \
@@ -303,7 +303,7 @@ expect_eq "labels digest is the default-branch labels blob" \
 	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
 expect_eq "labels digest is the digest of the bytes the capture read" \
 	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
-expect_eq "engine identity" "v3.2.3 $ENGINE_DIGEST linux/amd64" \
+expect_eq "engine identity" "v3.4.0 $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
 expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
 	'.args == ["baseline", "--refresh", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
@@ -787,13 +787,13 @@ expect_eq "the action fails" 1 "$action_rc"
 expect_eq "verdict" needs_attention "$(out verdict)"
 expect "the error names the unsatisfied local gate" log_has "hard gates did not pass"
 
-for unsupported in v3.0.0 v3.0.1 v3.2.0 v3.2.1 v3.2.2 v3.2.4; do
+for unsupported in v3.0.1 v3.2.2 v3.2.3 v3.3.0 v3.4.1; do
 	begin "engine $unsupported is refused before the checkout"
 	on_push "$c2"
 	export ARCHFIT_ENGINE_VERSION=$unsupported
 	run_action "$origin"
 	expect_eq "the action fails" 1 "$action_rc"
-	expect "the error names the one supported engine" log_has "this action runs engine v3.2.3 only"
+	expect "the error names the one supported engine" log_has "this action runs engine v3.4.0 only"
 	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 	expect_eq "no container ran" 0 "$(engine_calls)"
 
@@ -801,7 +801,7 @@ done
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v3.2.3
+export ARCHFIT_IMAGE_DIGEST=v3.4.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
@@ -824,13 +824,13 @@ for endpoint in https://archfit.example https://archfit.example/app http://127.0
 	expect_eq "prepare succeeds" 0 "$action_rc"
 done
 
-for wrong_version in v3.1.0 v3.2.2; do
+for wrong_version in v3.2.3 v3.3.0; do
 	begin "an image of engine $wrong_version is refused before analysis"
 	on_push "$c2"
 	export FAKE_ENGINE_VERSION=$wrong_version
 	run_action "$origin"
 	expect_eq "the action fails" 1 "$action_rc"
-	expect "the error names both versions" log_has "is engine $wrong_version, not v3.2.3"
+	expect "the error names both versions" log_has "is engine $wrong_version, not v3.4.0"
 	expect_eq "only the version probe ran" 1 "$(engine_calls)"
 done
 
@@ -1239,34 +1239,9 @@ policy_mount() { jq -r --arg t "$1" '.options | [range(length) as $i | select(.[
 	| map(select(endswith(":" + $t + ":ro"))) | .[0] // "" | sub(":" + $t + ":ro$"; "")' <<<"$(engine_call config)"; }
 compare_calls() { jq -s 'map(select(.command == "run" and .args[0] == "config")) | length' "$FAKE_DOCKER_LOG"; }
 
-pinned=$(sed -n 's/^readonly SUPPORTED_ENGINE_VERSION=\([^ ]*\)$/\1/p' "$root/scripts/lib.sh")
-policy_change_from=$(sed -n 's/^readonly POLICY_CHANGE_FROM=\([^ ]*\)$/\1/p' "$root/scripts/lib.sh")
-
-begin "pull request that changes the policy, pinned engine that prints no classification: no comparison"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
-expect_eq "no artifact" "" "$(out policy-change-file)"
-expect "the step summary says the engine does not classify yet" summary_has "Policy change: not classified: the pinned engine $pinned does not classify policy changes; the classification starts with $policy_change_from"
-
-# The classification path needs the engine release that prints it. These cases run the
-# shipped scripts with one constant changed, the engine pin, as the release PR changes it.
-classifying=$tmp/classifying
-mkdir -p "$classifying"
-cp -R "$root/scripts" "$classifying/scripts"
-sed -i.orig "s/^readonly SUPPORTED_ENGINE_VERSION=.*/readonly SUPPORTED_ENGINE_VERSION=$policy_change_from/" "$classifying/scripts/lib.sh"
-rm -f "$classifying/scripts/lib.sh.orig"
-expect "the classifying copy differs from the shipped scripts only in the engine pin" \
-	test "$(diff "$root/scripts/lib.sh" "$classifying/scripts/lib.sh" | grep -c '^[<>]')" = 2
-use_classifying_engine() {
-	export ARCHFIT_TEST_SCRIPTS=$classifying/scripts ARCHFIT_ENGINE_VERSION=$policy_change_from FAKE_ENGINE_VERSION=$policy_change_from
-}
 policy_change_of() { jq -c '.policy_change' "$1"; }
 
 begin "pull request that widens an allowlist: classified, archived and summarised"
-use_classifying_engine
 on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
 export FAKE_COMPARE=$fixtures/widen.json
 start_app "[$ok_answer]"
@@ -1288,7 +1263,6 @@ cp "$(out envelope-file)" "$tmp/policy-change.envelope"
 expect "the verdict is the head's alone" test "$(out verdict)" = blocked
 
 begin "pull request that adds a rule: tightening"
-use_classifying_engine
 on_pull_request "$pc_addrule" "$pc_base" acme/shop "$m_addrule"
 export FAKE_COMPARE=$fixtures/addrule.json
 start_app "[$ok_answer]"
@@ -1299,7 +1273,6 @@ expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-
 expect_eq "the envelope carries the tightening" tightening "$(envelope_field policy_change.direction)"
 
 begin "pull request that excludes a source tree: coverage lost"
-use_classifying_engine
 on_pull_request "$pc_exclude" "$pc_base" acme/shop "$m_exclude"
 export FAKE_COMPARE=$fixtures/exclude.json
 start_app "[$ok_answer]"
@@ -1309,19 +1282,17 @@ expect "the step summary counts the coverage lost" summary_has "Policy change: l
 expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 expect_eq "the envelope carries the coverage lost" exclude_added "$(envelope_field 'policy_change.coverage_lost[0].kind')"
 
-begin "engine v3.2.3, which prints no policy-change section: archived, reported as not classified"
-use_classifying_engine
+begin "engine output without the policy-change section: archived, reported as not classified"
 on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-export FAKE_COMPARE=$fixtures/widen.json FAKE_COMPARE_V32=true
+export FAKE_COMPARE=$fixtures/widen.json FAKE_COMPARE_NO_SECTION=true
 start_app "[$ok_answer]"
 run_action "$policy_origin"
 expect_eq "the action succeeds" 0 "$action_rc"
-expect "the step summary says the engine does not classify" summary_has "Policy change: not classified: engine $policy_change_from has no policy-change section"
+expect "the step summary says the engine does not classify" summary_has "Policy change: not classified: engine v3.4.0 has no policy-change section"
 expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
 expect "the document is archived" test -s "$(out policy-change-file)"
 
 begin "the classification fails: a warning, the report is still sent"
-use_classifying_engine
 on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
 export FAKE_COMPARE_RC=3
 start_app "[$ok_answer]"
@@ -1334,7 +1305,6 @@ expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out en
 expect_eq "the report is still sent" 1 "$(requests upload)"
 
 begin "pull request that leaves the policy unchanged: no classification"
-use_classifying_engine
 on_pull_request "$pc_code" "$pc_base" acme/shop "$m_code"
 start_app "[$ok_answer]"
 run_action "$policy_origin"
@@ -1344,7 +1314,6 @@ expect_eq "no artifact" "" "$(out policy-change-file)"
 expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
 
 begin "pull request that changes no policy, while the base tip has tightened it since the branch: no classification"
-use_classifying_engine
 git -C "$policy_origin" checkout --quiet -b code-late "$pc_base"
 printf '// later\n' >>"$policy_origin/pkg/b/b.go"
 commit_all "$policy_origin" code-late
@@ -1364,7 +1333,6 @@ expect "the step summary has no policy change" bash -c '! grep -q "Policy change
 expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
 
 begin "analysis-only pull request that makes .archfit.yaml a gitlink: not classified, the job still succeeds"
-use_classifying_engine
 git -C "$policy_origin" checkout --quiet -b gitlink "$pc_base"
 git -C "$policy_origin" rm --quiet .archfit.yaml
 git -C "$policy_origin" update-index --add --cacheinfo "160000,$pc_base,.archfit.yaml"
@@ -1379,7 +1347,6 @@ expect "the step summary says the head's policy is not a regular file" summary_h
 expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
 expect "the report is still produced" test "$(out artifact-name)" = archfit-report
 begin "policy change whose edit orders nothing (direction none): no policy_change in the envelope"
-use_classifying_engine
 on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
 jq '.policy_change |= (.direction = "none" | .allowlists_widened = [])' "$fixtures/widen.json" >"$case_dir/none.json"
 export FAKE_COMPARE=$case_dir/none.json
@@ -1390,7 +1357,6 @@ expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out en
 expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 
 begin "policy change too large for the envelope: sent without it, with a warning"
-use_classifying_engine
 on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
 jq '.policy_change.allowlists_widened = [range(400) | {module: "module_\(.)", field: "depends_on", from: "none", to: "[b]"}]' \
 	"$fixtures/widen.json" >"$case_dir/huge.json"

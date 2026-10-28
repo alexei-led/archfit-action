@@ -5,16 +5,16 @@
 # shellcheck disable=SC2016,SC2034,SC2154
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# Released v3.2.3 platform manifests, verified against image-identity.json.
+# Released v3.4.0 platform manifests (the index lists both; each reports archfit v3.4.0, commit 2692cd6).
 readonly TEST_RUNNER_ARCH=${RUNNER_ARCH:-X64}
 case $TEST_RUNNER_ARCH in
 X64)
 	ENGINE_PLATFORM=linux/amd64
-	ENGINE_DIGEST=sha256:87323e8d80d519531338ff7a36ce750d337ecf6560e48493bdeb10b864e7b772
+	ENGINE_DIGEST=sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
 	;;
 ARM64)
 	ENGINE_PLATFORM=linux/arm64
-	ENGINE_DIGEST=sha256:54f6bf1ec99be6f4bdc21ca59e16d3dd65fb5b31a2c2af6c932ad556c89a220c
+	ENGINE_DIGEST=sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f
 	;;
 *)
 	printf 'unsupported test runner: %s\n' "$TEST_RUNNER_ARCH" >&2
@@ -116,8 +116,8 @@ new_case() {
 	: >"$GITHUB_STEP_SUMMARY"
 	export GITHUB_WORKSPACE=$case_dir/workspace GITHUB_REPOSITORY=acme/shop
 	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=$TEST_RUNNER_ARCH
-	export ARCHFIT_ENGINE_VERSION=v3.2.3 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
-	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE ARCHFIT_TEST_SCRIPTS \
+	export ARCHFIT_ENGINE_VERSION=v3.4.0 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
+	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
 		ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 }
 
@@ -159,15 +159,13 @@ checkout() {
 
 # run_action ORIGIN runs the action's steps as action.yml wires them; the artifact
 # upload in between is GitHub's own action. Sets action_rc; the log is $case_dir/log.
-# ARCHFIT_TEST_SCRIPTS names another copy of scripts/ to run (see use_classifying_engine).
 run_action() {
-	local scripts=${ARCHFIT_TEST_SCRIPTS:-$root/scripts}
 	action_rc=0
 	{
-		bash "$scripts/prepare.sh" &&
+		bash "$root/scripts/prepare.sh" &&
 			checkout "$1" "$(out ref)" &&
-			ARCHFIT_MODE=$(out mode) bash "$scripts/run.sh" &&
-			ARCHFIT_FACTS=$(out facts-file) bash "$scripts/report.sh"
+			ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh" &&
+			ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
 	} >"$case_dir/log" 2>&1 || action_rc=$?
 }
 
