@@ -5,10 +5,7 @@
 # The engine image. The image-digest input selects the build inside it.
 readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 # The only engine release this action runs (the App's manifest names its image digests).
-readonly SUPPORTED_ENGINE_VERSION=v3.2.3
-# The first engine release whose config compare prints the policy_change section (E11).
-# Earlier engines print none, so the action does not run the comparison for them.
-readonly POLICY_CHANGE_FROM=v3.4.0
+readonly SUPPORTED_ENGINE_VERSION=v3.4.0
 # The engine state contract this action carries (`archfit check --json`).
 readonly STATE_SCHEMA=archfit.architecture-state.v1
 

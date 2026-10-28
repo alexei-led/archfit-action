@@ -18,4 +18,4 @@ was edited. The branch build (873ddb1c) printed the same classification without 
   - `addrule.json` bb069ce1c27741fae5a259a3cc57202b841ffd1fc4dbed9029a971f9e87feabf
   - `exclude.json` 91c51bce25d403a3d6495eb626c919f4d5aa3f10b6aae9031fee90af128a502e
 
-Re-capture from the published v3.4.0 image before the release, and update the hashes here.
+Re-captured from the published v3.4.0 image (`ghcr.io/alexei-led/archfit@sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f`, linux/arm64) with the same command inside the container: the `policy_change` objects and the whole documents are byte-identical to the feec08c3 build, so the hashes above hold.

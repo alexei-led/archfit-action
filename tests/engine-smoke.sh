@@ -2,7 +2,7 @@
 # End-to-end check against the real pinned engine image; needs docker and network.
 #
 # Drives the action's steps (prepare, checkout, run, report) on a scratch Go repository
-# with the released native v3.2.3 platform image. App admission is a separate gate.
+# with the released native v3.4.0 platform image. App admission is a separate gate.
 # It proves the identity the action derives, that the engine reads exactly the
 # bundle bytes the envelope digests, that git history works through the read-only .git
 # mount, that a baseline the action captures is comparable for the next report run, and
@@ -40,7 +40,7 @@ if [[ -n ${ARCHFIT_FIXTURES_OUT:-} ]]; then
 fi
 expect_eq "a blocked verdict fails an analysis-only job" 1 "$action_rc"
 expect_eq "verdict" blocked "$(out verdict)"
-expect_eq "engine_version is what the image reports" v3.2.3 "$(fact engine_version)"
+expect_eq "engine_version is what the image reports" v3.4.0 "$(fact engine_version)"
 expect_eq "platform is the image's" "$ENGINE_PLATFORM" "$(fact platform)"
 expect_eq "config_hash is the digest of the policy blob the action materialized" \
 	"$(blob_sha256 "$origin" "$head:.archfit.yaml")" "$(jq -r .comparison.config_hash "$payload")"
@@ -56,7 +56,7 @@ export ARCHFIT_MODE=baseline
 run_action "$origin"
 expect_eq "the capture succeeds" 0 "$action_rc"
 expect_eq "baseline schema" archfit.baseline.v3 "$(jq -r .schema_version "$(out payload-file)")"
-expect "a v3.2.3 capture stores neither dimensions nor hard-gate IDs" \
+expect "a v3.4.0 capture stores neither dimensions nor hard-gate IDs" \
 	jq -e '.state | (has("dimensions") or has("hard_gate_finding_ids")) | not' "$(out payload-file)"
 expect "capture omits an unmeasured encapsulation reference" \
 	jq -e '.metrics | has("encapsulation") | not' "$(out payload-file)"

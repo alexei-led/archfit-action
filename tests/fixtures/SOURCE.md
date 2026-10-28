@@ -1,33 +1,34 @@
 # Fixture provenance
 
 The current `state.json`, `reanchored-baseline.json`, and `reanchor-report.txt`
-were emitted unmodified by released Engine **v3.2.3**, source
-`c7490636480a8faedddf3bff1d0a678a7ab7987c`, using the synthetic Go repository
-in `tests/engine-smoke.sh`.
+were emitted unmodified by released Engine **v3.4.0**, source
+`2692cd6b8aab23e559d0aa76712a192d69b4229f`, using the synthetic Go repository
+in `tests/engine-smoke.sh` (`ARCHFIT_FIXTURES_OUT`).
 
 - Native Linux arm64 Docker daemon (Colima on Apple Silicon).
-- Platform image: `ghcr.io/alexei-led/archfit@sha256:54f6bf1ec99be6f4bdc21ca59e16d3dd65fb5b31a2c2af6c932ad556c89a220c`.
-- The image reports `archfit version v3.2.3 (commit c749063, built 2026-10-26T11:51:31Z)`.
+- Platform image: `ghcr.io/alexei-led/archfit@sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f` (linux/arm64; index `sha256:e4c258d0698c223cca223568a9fec1cd5393937cc6e6ce58def1f62b66205dd4`).
+- The image reports `archfit version v3.4.0 (commit 2692cd6, built 2026-10-28T18:42:58Z)`.
 - The Action ran through prepare, checkout, run and report with synthetic GitHub
   events and no upload endpoint. Its envelope is test evidence, not GitHub
   authentication or independently verified report content.
 - Native smoke passed all 33 assertions: report, actual stored-baseline capture,
   comparable check, reanchor, legacy state-field removal and pull-request origin.
 - Captures omit the unmeasured encapsulation reference but retain measured cycle zero.
-- These three outputs are byte-identical to the earlier genuine v3.2.2 captures.
-  Their new provenance was verified by executing the real published v3.2.3 image,
-  not by relabeling or tailoring JSON. Their measurement profile and fact-input
-  hashes also match the prior capture exactly.
+- `reanchor-report.txt` is byte-identical to the v3.2.3 capture. `state.json` and
+  `reanchored-baseline.json` differ from it only where v3.4.0 adds to the contract:
+  the top-level `identity` block, a `supplied-coverage` measurement-profile producer,
+  and the `dotnet-msbuild`, `roslyn` and `supplied-coverage` coverage tools. Nothing
+  was relabeled or tailored.
 
 | File | SHA-256 |
 | --- | --- |
-| `state.json` | `c472d77d04cf03d912d1a3f8b41e7494c9a688da60d957a71d789e05f07c5127` |
-| `reanchored-baseline.json` | `254496115e437d0f7d32f7273626a808596152556d40b0edfb24bb9ee848a88f` |
+| `state.json` | `958a3de5c00bd41d8221a58381c6f30653ba1ae114f285ec34401954509c5d34` |
+| `reanchored-baseline.json` | `ea073aa8eb5b6f9c8e16a4571d6e2ca10e40b74dc711c60a6083f8f4f763737f` |
 | `reanchor-report.txt` | `9150a14a515ac840b0b6cd851a89dee49e65e4d80bcb8395c6e484f7d0fd6f38` |
 
 The same smoke recipe exports a fresh `captured-baseline.json` and `envelope.json`
 when `ARCHFIT_FIXTURES_OUT` is set. The fresh stored baseline's SHA-256 is
-`8dd2d79aefa9852cbf6bfbcd20b6b38e666d83986d66f464f9e142a2a260418e`.
+`08e1b5572046781772d87b584325edcc24188b08afbeecf08adff1b15768981d`.
 These are qualification artifacts, not manufactured transport fixtures.
 
 To reproduce on an existing native arm64 `colima` context, use a new owned output

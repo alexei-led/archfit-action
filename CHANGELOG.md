@@ -24,15 +24,17 @@
   `policy_change` field for the App. Report-only: a failure is a warning and the
   verdict is unchanged. The field is left out when the change orders nothing, and
   when it would make the envelope larger than 8192 bytes (the log warns). The
-  comparison runs only with engine v3.4.0 or later, which prints the
-  classification; with an earlier engine the summary says the policy change is not
-  classified.
+  classification comes from engine v3.4.0 (`archfit config compare`).
 - Concurrency for hand-written workflows is documented in the README.
 
 ### Upgrade
 
-- Use the pinned engine version and its per-platform image digest together, as
-  listed for this release. Older engine versions are refused.
+- Run engine **v3.4.0** only, with its per-platform image manifest:
+  `linux/amd64` `sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b`,
+  `linux/arm64` `sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f`.
+  Do not substitute the multi-arch index digest. Older engine versions, v3.2.3
+  included, are refused before checkout. Update `engine-version` and
+  `image-digest` together with the action commit.
 - The App must accept the 18-key envelope with the optional `policy_change`
   (vendored schema sha256 `0c2de1a3691ac85935f04887b94bc98dbc01f57f65a9c4fc3db276d5bf78b7e6`)
   before the action reports to it. A

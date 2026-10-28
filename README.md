@@ -39,8 +39,8 @@ jobs:
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v3.2.3"
-          image-digest: "sha256:87323e8d80d519531338ff7a36ce750d337ecf6560e48493bdeb10b864e7b772"
+          engine-version: "v3.4.0"
+          image-digest: "sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b"
           mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
 ```
 
@@ -137,7 +137,7 @@ baseline and reanchor (a reanchor also keeps the engine's report there).
 | --- | --- | --- |
 | `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v3.2.3`. An image that reports another version is refused. |
+| `engine-version` | *(required)* | Engine release of the image, for example `v3.4.0`. An image that reports another version is refused. |
 | `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
 | `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
 
@@ -228,10 +228,6 @@ engine printed it, and the step summary gives its direction and counts:
 - `tightens`: the mirror of those lists;
 - `coverage lost`: source that is no longer measured (an exclude added, a language
   or analyzer turned off, a module or its paths removed).
-
-The action runs the comparison only with an engine that prints the classification:
-v3.4.0 and later. With the pinned v3.2.3 it does not run, and the summary says so.
-The release that moves the pin to v3.4.0 turns it on.
 
 The engine's `policy_change` object also goes to the App, verbatim, as the
 envelope's optional `policy_change` field; the report payload is unchanged. It is
@@ -408,7 +404,7 @@ shellcheck -x scripts/*.sh tests/*.sh tests/fakes/docker
 
 `tests/run.sh` drives the shipped scripts on scratch repositories. Only process and
 network boundaries are faked. Its state and reanchor fixtures are unmodified outputs
-from the released v3.2.3 image. [Fixture provenance](tests/fixtures/SOURCE.md) records
+from the released v3.4.0 image. [Fixture provenance](tests/fixtures/SOURCE.md) records
 producer identity and byte hashes. The stored v3.0.0 baseline remains historical.
 
 `tests/report-evidence.sh` replays genuine release captures through the report stage,
