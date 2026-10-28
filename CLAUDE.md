@@ -125,6 +125,12 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   use `--refresh`; never remove it to hide a comparability or evidence failure.
 - **One engine.** The Action runs engine v3.2.3 only. Older engines, schemas and
   envelope shapes are refused, not adapted (no users yet; see the v2.0.0 release notes).
+- **The policy-change classification is report-only.** On a pull request that changes
+  `.archfit.yaml` (merge base..head) the action runs `config compare` with the head's
+  file against the base tip's, only on an engine that prints `policy_change`
+  (`POLICY_CHANGE_FROM`). The object goes verbatim into the envelope's optional
+  `policy_change`, and is left out over the 8192-byte cap, never truncated. Its failure
+  never changes the verdict, the exit code or the upload.
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.
   Never suggest `:latest` or a tag. The image platform must equal the runner's
   (`RUNNER_ARCH`); `engine_version` must equal the input. Both are checked before analysis.

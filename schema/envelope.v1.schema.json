@@ -86,6 +86,26 @@
       "type": "string",
       "description": "Bare hex SHA-256 of the labels file the engine loaded; empty when it loaded none.",
       "pattern": "^([0-9a-f]{64})?$"
+    },
+    "policy_change": {
+      "type": "object",
+      "description": "Optional. The engine's classification of the pull request's .archfit.yaml change (archfit config compare, policy_change), head file against the base tip's. Absent when the pull request does not change the policy, the change orders nothing, the engine does not classify, or the object does not fit the envelope. The list items are the engine's; this schema checks only the lists.",
+      "additionalProperties": false,
+      "required": ["direction", "rules_removed", "rules_loosened", "waivers_added", "allowlists_widened", "coverage_lost", "declarations_changed", "rules_added", "rules_tightened", "waivers_removed", "allowlists_narrowed", "coverage_gained"],
+      "properties": {
+          "direction": { "enum": ["tightening", "loosening", "mixed"] },
+          "rules_removed": { "type": "array", "items": { "type": "object" } },
+          "rules_loosened": { "type": "array", "items": { "type": "object" } },
+          "waivers_added": { "type": "array", "items": { "type": "object" } },
+          "allowlists_widened": { "type": "array", "items": { "type": "object" } },
+          "coverage_lost": { "type": "array", "items": { "type": "object" } },
+          "declarations_changed": { "type": "array", "items": { "type": "object" } },
+          "rules_added": { "type": "array", "items": { "type": "object" } },
+          "rules_tightened": { "type": "array", "items": { "type": "object" } },
+          "waivers_removed": { "type": "array", "items": { "type": "object" } },
+          "allowlists_narrowed": { "type": "array", "items": { "type": "object" } },
+          "coverage_gained": { "type": "array", "items": { "type": "object" } }
+      }
     }
   },
   "allOf": [
@@ -107,8 +127,18 @@
           "pull_request": { "const": 0 },
           "base_sha": { "const": "" },
           "merge_base_sha": { "const": "" },
-          "integration": { "const": "" }
+          "integration": { "const": "" },
+          "policy_change": false
         }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "report" } },
+        "required": ["kind"]
+      },
+      "else": {
+        "properties": { "policy_change": false }
       }
     },
     {

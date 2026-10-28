@@ -117,7 +117,7 @@ new_case() {
 	export GITHUB_WORKSPACE=$case_dir/workspace GITHUB_REPOSITORY=acme/shop
 	export GITHUB_RUN_ID=17654321098 GITHUB_RUN_ATTEMPT=1 RUNNER_ARCH=$TEST_RUNNER_ARCH
 	export ARCHFIT_ENGINE_VERSION=v3.2.3 ARCHFIT_IMAGE_DIGEST=$ENGINE_DIGEST
-	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE \
+	unset ARCHFIT_MODE ARCHFIT_ENDPOINT ARCHFIT_AUDIENCE ARCHFIT_TEST_SCRIPTS \
 		ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 }
 
@@ -159,13 +159,15 @@ checkout() {
 
 # run_action ORIGIN runs the action's steps as action.yml wires them; the artifact
 # upload in between is GitHub's own action. Sets action_rc; the log is $case_dir/log.
+# ARCHFIT_TEST_SCRIPTS names another copy of scripts/ to run (see use_classifying_engine).
 run_action() {
+	local scripts=${ARCHFIT_TEST_SCRIPTS:-$root/scripts}
 	action_rc=0
 	{
-		bash "$root/scripts/prepare.sh" &&
+		bash "$scripts/prepare.sh" &&
 			checkout "$1" "$(out ref)" &&
-			ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh" &&
-			ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
+			ARCHFIT_MODE=$(out mode) bash "$scripts/run.sh" &&
+			ARCHFIT_FACTS=$(out facts-file) bash "$scripts/report.sh"
 	} >"$case_dir/log" 2>&1 || action_rc=$?
 }
 

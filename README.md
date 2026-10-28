@@ -233,16 +233,22 @@ The action runs the comparison only with an engine that prints the classificatio
 v3.4.0 and later. With the pinned v3.2.3 it does not run, and the summary says so.
 The release that moves the pin to v3.4.0 turns it on.
 
-This section is report-only. A failed classification is a warning, the verdict and
-the exit code are unchanged, and nothing is sent to the App: the App's policy
-change card reads the classification once the App accepts it. A pull request that
-does not change `.archfit.yaml`, every `push` and every `workflow_dispatch` run skip
-it.
+The engine's `policy_change` object also goes to the App, verbatim, as the
+envelope's optional `policy_change` field; the report payload is unchanged. It is
+left out when the change orders nothing (`direction: none`), when nothing was
+classified, and when it would make the envelope larger than the App's 8192-byte
+cap (the log warns; the artifact still holds it). An envelope without it says
+nothing about whether the policy changed.
+
+This section is report-only. A failed classification is a warning and the verdict
+and the exit code are unchanged. A pull request that does not change
+`.archfit.yaml`, every `push` and every `workflow_dispatch` run skip it.
 
 ## The envelope
 
 The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 18 flat
-typed keys. [`schema/`](schema/) holds the vendored copy, and
+typed keys, plus the optional `policy_change` object on a pull request report (see
+[Policy change](#policy-change)). [`schema/`](schema/) holds the vendored copy, and
 [`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
 sha256. CI validates the envelopes the action builds for `pull_request` and
 `push` reports and for the discovery, baseline and reanchor envelopes against it.
