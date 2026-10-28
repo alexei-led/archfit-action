@@ -48,20 +48,18 @@ is_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 # event_field FILTER prints a field of the event payload, or nothing when it is absent.
 event_field() { jq -r "$1 // empty" "${GITHUB_EVENT_PATH:?}"; }
 
-# pull_request_commits prints "merged MERGE" when GitHub computed the test merge commit
-# of the pull request, or "conflicts HEAD" when it reports the pull request as not
-# mergeable (no merge commit; the head is analysed). It fails when GitHub has computed
-# neither yet: the run cannot tell which commit to analyse. mergeable is read raw,
-# because `// empty` would turn false into nothing.
+# pull_request_commits prints "merged MERGE" for the test merge commit of the pull request,
+# or "conflicts HEAD" when the event reports it as not mergeable (the head is analysed).
+# The merge commit is located by the job's GITHUB_SHA on refs/pull/N/merge, not by the
+# event's merge_commit_sha: GitHub fills that field and `mergeable` in after the event
+# is sent, so both are often null in the payload of a run that has a merge commit. The
+# locator is not trusted: run.sh accepts it only when its parents are the event's base
+# and head. mergeable is read raw, because `// empty` would turn false into nothing.
 pull_request_commits() {
-	local merge mergeable
-	merge=$(event_field .pull_request.merge_commit_sha)
-	mergeable=$(jq -r '.pull_request.mergeable | tostring' "${GITHUB_EVENT_PATH:?}")
-	# A conflicting pull request can still carry the merge commit of an earlier state.
-	if [[ $mergeable == false ]]; then
+	if [[ $(jq -r '.pull_request.mergeable | tostring' "${GITHUB_EVENT_PATH:?}") == false ]]; then
 		printf 'conflicts %s\n' "$(event_field .pull_request.head.sha)"
-	elif is_sha "$merge"; then
-		printf 'merged %s\n' "$merge"
+	elif [[ ${GITHUB_REF:-} =~ ^refs/pull/[0-9]+/merge$ ]] && is_sha "${GITHUB_SHA:-}"; then
+		printf 'merged %s\n' "$GITHUB_SHA"
 	else
 		return 1
 	fi

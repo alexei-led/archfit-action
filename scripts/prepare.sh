@@ -51,14 +51,15 @@ esac
 # end as unsupported_event, so it is refused before any work.
 [[ $event != workflow_dispatch || $mode != report ]] ||
 	die "a workflow_dispatch run does not report: set mode: discovery to propose a policy, mode: baseline to capture accepted debt or mode: reanchor to carry it to this engine. Reports come from pull_request and push runs."
-# The analysed commit comes from the event payload, never from the job context. A pull
-# request is analysed as it would land: the test merge commit GitHub computed, or the
-# head when GitHub reports conflicts. The head stays the commit approval binds to.
+# The analysed commit is tied to the event payload. A pull request is analysed as it
+# would land: the test merge commit of the run (checked against the event's base and
+# head in run.sh), or the head when the event reports conflicts. The head stays the
+# commit approval binds to.
 integration=""
 case $event in
 pull_request)
 	commits=$(pull_request_commits) ||
-		die "GitHub has not computed the merge commit of this pull request yet (mergeable is null); run the job again in a moment"
+		die "this pull_request run has no merge commit to analyse: GITHUB_REF '${GITHUB_REF:-}' is not refs/pull/<number>/merge or GITHUB_SHA is not a commit"
 	read -r integration ref <<<"$commits"
 	;;
 *) ref=${GITHUB_SHA:?} ;;

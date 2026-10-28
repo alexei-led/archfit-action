@@ -229,12 +229,14 @@ labels files the engine read. Head, base, merge commit and pull request come
 from the event payload, never from the job context.
 
 `head_sha` is the pull request head, the commit an owner approves.
-`analyzed_sha` is the commit the engine measured: GitHub's test merge commit of
-the head into the base (`integration: merged`), whose parents must be the
-event's base and head, or the head itself when GitHub reports the pull request
-as conflicting (`integration: conflicts`). When GitHub has computed neither yet
-(`mergeable` is null), the job fails before the checkout; run it again. Off pull
-requests `analyzed_sha` equals `head_sha` and `integration` is empty.
+`analyzed_sha` is the commit the engine measured: the run's test merge commit of
+the head into the base (`integration: merged`), or the head itself when the event
+reports the pull request as conflicting (`integration: conflicts`). The merge
+commit is the run's `GITHUB_SHA` on `refs/pull/<number>/merge`, and the action
+accepts it only when its parents are exactly the event's base and head: the
+event's own `merge_commit_sha` is filled in by GitHub after the event is sent
+and is often null. Off pull requests `analyzed_sha` equals `head_sha` and
+`integration` is empty.
 
 It is **not** a security claim. Every field is self-reported by a job that runs
 pull-request code. The App binds the envelope to the OIDC token's claims and to

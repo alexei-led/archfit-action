@@ -28,9 +28,10 @@
 # RUNNER_TEMP, outside every mount.
 #
 # Analysed commit. A pull request is analysed as it would land: the test merge commit
-# GitHub computed (pull_request.merge_commit_sha), or the head when GitHub reports
-# conflicts. The head stays the commit approval binds to; the merge commit must be the
-# merge of the event's base and head, else the run fails.
+# of the run (GITHUB_SHA on refs/pull/N/merge), or the head when the event reports
+# conflicts. The head stays the commit approval binds to. The merge commit must have
+# exactly the event's base and head as parents, else the run fails: the job context
+# only says where to look, the event says what it must be.
 #
 # Origin. On a pull request the check also runs with --base: the engine checks that
 # commit out in a temporary worktree and marks every finding introduced,
@@ -97,7 +98,7 @@ resolve_revisions() {
 			die "$base_sha and $head have more than one merge base ($(tr '\n' ' ' <<<"$merge_base")); merge the base branch into the pull request so one merge base remains, then push"
 		input_tip=$(git -C "$src" rev-parse --verify --quiet "refs/remotes/origin/$base_ref^{commit}") ||
 			die "the base branch $base_ref was not fetched"
-		commits=$(pull_request_commits) || die "the pull_request event names no merge commit and does not report a conflict"
+		commits=$(pull_request_commits) || die "this pull_request run has no merge commit to analyse (GITHUB_REF is not refs/pull/<number>/merge)"
 		read -r integration analysed <<<"$commits"
 		if [[ $integration == merged ]]; then
 			assert_merge_of "$analysed" "$base_sha" "$head"

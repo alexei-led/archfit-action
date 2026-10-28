@@ -346,8 +346,8 @@ expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
 
 # --- Pull request integration: the merge commit, a conflict, a state GitHub has not computed ---
 
-begin "pull request GitHub reports as conflicting: the head is analysed alone"
-# A conflicting pull request can still carry the merge commit of an earlier state.
+begin "pull request the event reports as conflicting: the head is analysed alone"
+# Even when the job's GITHUB_SHA is a valid merge commit, the event's word wins.
 on_pull_request "$f1" "$c2" acme/shop "$m2"
 jq '.pull_request.mergeable = false' "$GITHUB_EVENT_PATH" >"$case_dir/conflict.json"
 export GITHUB_EVENT_PATH=$case_dir/conflict.json
@@ -362,17 +362,34 @@ expect "origin compares with the merge base, not the target tip" json_ok \
 	'.args[-2:] == ["--base", $m]' "$(engine_call check)" --arg m "$c1"
 expect "the step summary says the pull request conflicts" summary_has "analysed alone: the pull request conflicts with its base"
 
-begin "pull request whose merge GitHub has not computed: refused before the checkout"
+begin "event whose mergeable and merge_commit_sha GitHub has not filled in yet: the run's merge commit is used"
 on_pull_request "$f1" "$c2" acme/shop "$m2"
 jq '.pull_request.mergeable = null | .pull_request.merge_commit_sha = null' "$GITHUB_EVENT_PATH" >"$case_dir/pending.json"
 export GITHUB_EVENT_PATH=$case_dir/pending.json
 start_app "[$ok_answer]"
 run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "analyzed_sha is the run's merge commit" "$m2 merged" "$(envelope_field analyzed_sha) $(envelope_field integration)"
+
+begin "event with a stale merge_commit_sha: the payload field is not trusted"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+jq --arg s "$c1" '.pull_request.merge_commit_sha = $s' "$GITHUB_EVENT_PATH" >"$case_dir/stale.json"
+export GITHUB_EVENT_PATH=$case_dir/stale.json
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "analyzed_sha is the run's merge commit" "$m2" "$(envelope_field analyzed_sha)"
+
+begin "pull_request run whose ref is not a merge ref: refused before the checkout"
+on_pull_request "$f1" "$c2" acme/shop "$m2"
+export GITHUB_REF=refs/heads/feature
+start_app "[$ok_answer]"
+run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error says to run the job again" log_has "has not computed the merge commit of this pull request yet"
+expect "the error says there is no merge commit" log_has "has no merge commit to analyse"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 expect_eq "no engine run" 0 "$(engine_calls)"
-expect_eq "no upload" 0 "$(requests upload)"
 
 begin "merge commit of another base: refused, nothing analysed"
 # The event names c1 as the base, but m2 merges c2: its inputs and origin would not match.
