@@ -1,5 +1,5 @@
 repository: github.com/coupling-dev/archfit-app
 revision: f0213db1aadf4b309af37d4a480ef3febf785f47
 path: internal/wire/envelope/envelope.v1.schema.json
-sha256: d2c79be005eff4fe28a100dc9815de99a812209fe2e601c8070455eec94af0ad
-pending: analyzed_sha and integration are not in that revision yet. The App adopts these exact bytes in its release/agent-gate envelope PR, which pins this Action's merge commit. After that PR merges, replace revision with its merge commit and delete this line.
+sha256: 0c2de1a3691ac85935f04887b94bc98dbc01f57f65a9c4fc3db276d5bf78b7e6
+pending: analyzed_sha, integration and the optional policy_change are not in that revision yet. The App adopts these exact bytes in its release/agent-gate envelope PR, which pins this Action's merge commit. After that PR merges, replace revision with its merge commit and delete this line.

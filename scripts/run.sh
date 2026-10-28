@@ -59,6 +59,7 @@ readonly COMPARE_SCHEMA=archfit.config-compare.v1
 extra_mounts=()
 policy_change_status=""
 policy_change_ready=false
+policy_change_json=null # the engine's policy_change object, or null when nothing was classified
 
 mode=${ARCHFIT_MODE:?}
 image_digest=${ARCHFIT_IMAGE_DIGEST:?}
@@ -398,6 +399,7 @@ write_facts() {
 		--arg baseline_digest "$(digest_of .archfit-baseline.json)" \
 		--arg labels_digest "$(digest_of .archfit-labels.yaml)" \
 		--arg payload_file "$payload" --arg verdict "$verdict" \
+		--argjson policy_change "$policy_change_json" \
 		--rawfile inputs "$work/inputs.tsv" \
 		'{mode: $mode, kind: $kind, event: $event,
 		  head_sha: $head_sha, base_sha: $base_sha, merge_base_sha: $merge_base_sha,
@@ -405,7 +407,7 @@ write_facts() {
 		  pull_request: $pull_request, fork: $fork,
 		  engine_version: $engine_version, image_digest: $image_digest, platform: $platform,
 		  baseline_digest: $baseline_digest, labels_digest: $labels_digest,
-		  payload_file: $payload_file, verdict: $verdict,
+		  payload_file: $payload_file, verdict: $verdict, policy_change: $policy_change,
 		  inputs: ($inputs | split("\n") | map(select(length > 0) | split("\t")
 		    | {path: .[0], from: .[1], commit: .[2], sha256: .[3]}))}' \
 		>"$work/facts.json"
@@ -489,6 +491,9 @@ classify_policy_change() {
 		policy_change_status="not classified: engine $engine_version has no policy-change section"
 		return 0
 	fi
+	# A pull request whose policy edit changes nothing the classifier orders (a comment, a
+	# reordering) has direction none: nothing to report, so no object.
+	policy_change_json=$(jq -c '.policy_change | if .direction == "none" then null else . end' "$out/policy-change.json")
 	policy_change_status=$(jq -r '.policy_change as $c
 		| "\($c.direction): loosens \(($c.rules_removed + $c.rules_loosened + $c.waivers_added + $c.allowlists_widened + $c.declarations_changed) | length), tightens \(($c.rules_added + $c.rules_tightened + $c.waivers_removed + $c.allowlists_narrowed + $c.coverage_gained) | length), coverage lost \($c.coverage_lost | length)"' \
 		"$out/policy-change.json")
