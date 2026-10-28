@@ -1299,6 +1299,39 @@ expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
 expect_eq "no artifact" "" "$(out policy-change-file)"
 
+begin "pull request that changes no policy, while the base tip has tightened it since the branch: no classification"
+git -C "$policy_origin" checkout --quiet -b code-late "$pc_base"
+printf '// later\n' >>"$policy_origin/pkg/b/b.go"
+commit_all "$policy_origin" code-late
+pc_late=$(git -C "$policy_origin" rev-parse HEAD)
+git -C "$policy_origin" checkout --quiet main
+cp "$fixtures/addrule.candidate.yaml" "$policy_origin/.archfit.yaml"
+commit_all "$policy_origin" "main tightens the policy after the branch"
+pc_main=$(git -C "$policy_origin" rev-parse HEAD)
+m_late=$(merge_commit "$policy_origin" "$pc_main" "$pc_late" merge-late)
+on_pull_request "$pc_late" "$pc_main" acme/shop "$m_late"
+export FAKE_COMPARE=$fixtures/addrule.json
+start_app "[$ok_answer]"
+run_action "$policy_origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+expect "the step summary has no policy change" bash -c '! grep -q "Policy change" "$1"' _ "$GITHUB_STEP_SUMMARY"
+
+begin "analysis-only pull request that makes .archfit.yaml a gitlink: not classified, the job still succeeds"
+git -C "$policy_origin" checkout --quiet -b gitlink "$pc_base"
+git -C "$policy_origin" rm --quiet .archfit.yaml
+git -C "$policy_origin" update-index --add --cacheinfo "160000,$pc_base,.archfit.yaml"
+git -C "$policy_origin" -c user.name=test -c user.email=test@example.com commit --quiet -m gitlink
+pc_gitlink=$(git -C "$policy_origin" rev-parse HEAD)
+git -C "$policy_origin" checkout --quiet main
+on_pull_request "$pc_gitlink" "$pc_base" acme/shop
+run_action "$policy_origin"
+expect_eq "the job fails on the verdict (blocked), not on the classification" 1 "$action_rc"
+expect "the failure is the verdict's" log_has "the architecture verdict is blocked"
+expect "the step summary says the head's policy is not a regular file" summary_has "not classified: .archfit.yaml at the head is not a regular file"
+expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+expect "the report is still produced" test "$(out artifact-name)" = archfit-report
+
 begin "push: no classification, whatever the policy change"
 on_push "$pc_widen"
 start_app "[$ok_answer]"

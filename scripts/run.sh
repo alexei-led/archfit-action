@@ -58,6 +58,7 @@ readonly COMPARE_SCHEMA=archfit.config-compare.v1
 # extra_mounts holds the docker volumes a step adds to the engine call (policy change).
 extra_mounts=()
 policy_change_status=""
+policy_change_ready=false
 
 mode=${ARCHFIT_MODE:?}
 image_digest=${ARCHFIT_IMAGE_DIGEST:?}
@@ -415,26 +416,57 @@ write_facts() {
 	set_output verdict "$verdict"
 }
 
-# classify_policy_change writes the engine's classification of the policy change a pull
-# request proposes: the head's .archfit.yaml against the base tip's. The engine classifies
-# from the two files' declarations and measures nothing new. Report-only: a failure is a
-# warning, the verdict is not affected, and nothing is sent to the App; the document is an
-# artifact. The head's file is what the owner would approve, so it is the candidate.
-classify_policy_change() {
-	local current=$work/policy-current candidate=$work/policy-candidate rc=0 schema
+# blob_at REV PATH prints the blob of a regular file at REV, or nothing when PATH is absent
+# there. A gitlink or a symlink at PATH prints nothing too, and the caller says so.
+blob_at() {
+	local entry fmode ftype oid
+	entry=$(git -C "$src" ls-tree "$1" -- "$2") || die "git ls-tree failed for $2 at $1"
+	[[ -n $entry ]] || return 0
+	read -r fmode ftype oid <<<"${entry%%$'\t'*}"
+	[[ $ftype == blob && ($fmode == 100644 || $fmode == 100755) ]] && printf '%s' "$oid"
+	return 0
+}
+
+# prepare_policy_change writes the two policy files a classification compares. It runs
+# before the engine container, so no git runs on the runner after a container has run. The
+# candidate is the head's file and the current the base tip's, and only when the pull
+# request itself changes the policy: merge base..head decides, as materialize does for
+# every trusted input. Off that, nothing is classified.
+prepare_policy_change() {
+	local current=$work/policy-current candidate=$work/policy-candidate head_blob base_blob
+	policy_change_ready=false
 	[[ $event == pull_request ]] || return 0
-	[[ -n $(git -C "$src" ls-tree "$head" -- .archfit.yaml) ]] || return 0 # a deleted policy is refused above
-	[[ -n $(git -C "$src" ls-tree "$input_tip" -- .archfit.yaml) ]] || return 0
-	[[ $(git -C "$src" rev-parse "$head:.archfit.yaml") != "$(git -C "$src" rev-parse "$input_tip:.archfit.yaml")" ]] ||
+	if git -C "$src" diff --quiet --no-ext-diff "$merge_base" "$head" -- .archfit.yaml; then
 		return 0
+	fi
+	base_blob=$(blob_at "$input_tip" .archfit.yaml)
+	[[ -n $base_blob ]] || return 0 # no current policy to compare with
+	head_blob=$(blob_at "$head" .archfit.yaml)
+	if [[ -z $head_blob ]]; then
+		# A deleted policy is refused without an endpoint; with one the App decides.
+		[[ -z $(git -C "$src" ls-tree "$head" -- .archfit.yaml) ]] && return 0
+		policy_change_status="not classified: .archfit.yaml at the head is not a regular file"
+		return 0
+	fi
 	rm -rf "$current" "$candidate"
 	mkdir -p "$current" "$candidate"
-	git -C "$src" show "$input_tip:.archfit.yaml" >"$current/.archfit.yaml"
-	[[ -z $(git -C "$src" ls-tree "$input_tip" -- .archfit-labels.yaml) ]] ||
-		git -C "$src" show "$input_tip:.archfit-labels.yaml" >"$current/.archfit-labels.yaml"
-	git -C "$src" show "$head:.archfit.yaml" >"$candidate/.archfit.yaml"
+	git -C "$src" cat-file blob "$base_blob" >"$current/.archfit.yaml"
+	if labels_blob=$(blob_at "$input_tip" .archfit-labels.yaml) && [[ -n $labels_blob ]]; then
+		git -C "$src" cat-file blob "$labels_blob" >"$current/.archfit-labels.yaml"
+	fi
+	git -C "$src" cat-file blob "$head_blob" >"$candidate/.archfit.yaml"
+	policy_change_ready=true
+}
+
+# classify_policy_change runs the engine's classification of the files prepare_policy_change
+# wrote. The engine classifies from the two files' declarations and measures nothing new.
+# Report-only: a failure is a warning, the verdict is not affected, and nothing is sent to
+# the App; the document is an artifact.
+classify_policy_change() {
+	local rc=0 schema
+	[[ $policy_change_ready == true ]] || return 0
 	# The engine reads labels from the current file's directory, so that directory holds them.
-	extra_mounts=(--volume "$current:/current:ro" --volume "$candidate:/candidate:ro")
+	extra_mounts=(--volume "$work/policy-current:/current:ro" --volume "$work/policy-candidate:/candidate:ro")
 	engine config compare /candidate/.archfit.yaml -c /current/.archfit.yaml --root /src --json \
 		>"$out/policy-change.json" 2>"$out/policy-change.err" || rc=$?
 	extra_mounts=()
@@ -503,6 +535,7 @@ report)
 	fi
 	engine_identity
 	payload=$out/archfit-state.json
+	prepare_policy_change
 	# origin_base is empty off pull requests, so push runs measure the commit alone.
 	check "$payload" "$origin_base"
 	classify_policy_change
