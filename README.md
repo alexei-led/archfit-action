@@ -225,8 +225,9 @@ CI.
 The envelope states what was analysed: repository, event, pull request, head,
 base and merge base, the commit analysed and how the pull request integrates,
 run, engine identity, and the digests of the payload and of the baseline and
-labels files the engine read. Head, base, merge commit and pull request come
-from the event payload, never from the job context.
+labels files the engine read. Head, base and pull request come from the event
+payload, never from the job context. The merge commit is located by the job
+(see below) and accepted only when the event confirms it.
 
 `head_sha` is the pull request head, the commit an owner approves.
 `analyzed_sha` is the commit the engine measured: the run's test merge commit of
@@ -336,7 +337,7 @@ When the pull request does not carry a baseline, nothing is mounted at
 `/bundle/.archfit-baseline.json`, and that path is writable. The engine loads
 the baseline before any analyzer runs, so analysis cannot plant one there.
 
-`--base` checks the merge base out with `git worktree add --detach`. That
+`--base` checks the base commit out with `git worktree add --detach`. That
 command writes only `.git/worktrees/<name>` (`HEAD`, `index`, `gitdir`). So for
 that run an empty `RUNNER_TEMP` directory is mounted writable over
 `/src/.git/worktrees`, and the rest of `.git` stays read-only. Git on the

@@ -299,7 +299,7 @@ check() {
 		*)
 			show_engine_log
 			warning "the comparison with $base ended without a report (archfit exit $rc); origin is missing for this run. Running the check again without --base."
-			origin="missing (the comparison with the merge base failed; see the log)"
+			origin="missing (the comparison with the base commit failed; see the log)"
 			# The first run could write /bundle, including a baseline where none is mounted.
 			# The engine reads its baseline before analysis, so one run cannot plant its own;
 			# a second run on the same directory would read the plant. It gets a new one,
