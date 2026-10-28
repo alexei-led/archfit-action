@@ -112,7 +112,7 @@ begin() { # NAME
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
 	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
+	unset FAKE_COMPARE FAKE_COMPARE_RC FAKE_COMPARE_V32 FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
 		FAKE_BASE_RC FAKE_BASE_SYMLINK FAKE_BASE_LOCKED
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
@@ -1199,6 +1199,162 @@ mutate reanchor-short-baseline-digest '.baseline_digest = ("5b" * 31)' "$tmp/rea
 mutate reanchor-prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)' "$tmp/reanchor.envelope"
 mutate reanchor-with-pull-request '.pull_request = 42' "$tmp/reanchor.envelope"
 mutate reanchor-with-base-sha ".base_sha = \"$ra\"" "$tmp/reanchor.envelope"
+
+# --- Policy change: the engine's classification of a proposed policy -----------------
+
+begin "policy-change fixtures are the engine's output, pinned by sha256"
+fixtures=$root/tests/fixtures/policy-change
+expect_eq "widen.json" 79a08107a657c97abb7f64127f9738321ff0b3f3578637c21bd818971f29a621 "$(sha_of "$fixtures/widen.json")"
+expect_eq "addrule.json" bb069ce1c27741fae5a259a3cc57202b841ffd1fc4dbed9029a971f9e87feabf "$(sha_of "$fixtures/addrule.json")"
+expect_eq "exclude.json" 91c51bce25d403a3d6495eb626c919f4d5aa3f10b6aae9031fee90af128a502e "$(sha_of "$fixtures/exclude.json")"
+
+policy_origin=$tmp/policy-origin
+git init --quiet -b main "$policy_origin"
+write_module "$policy_origin"
+cp "$fixtures/base-none.yaml" "$policy_origin/.archfit.yaml"
+commit_all "$policy_origin" "code and policy"
+pc_base=$(git -C "$policy_origin" rev-parse HEAD)
+policy_branch() { # NAME FILE: a branch from the base that replaces the policy with FILE (or deletes it)
+	git -C "$policy_origin" checkout --quiet -b "$1" "$pc_base"
+	if [[ $2 == - ]]; then git -C "$policy_origin" rm --quiet .archfit.yaml; else cp "$fixtures/$2" "$policy_origin/.archfit.yaml"; fi
+	commit_all "$policy_origin" "$1"
+	git -C "$policy_origin" rev-parse HEAD
+	git -C "$policy_origin" checkout --quiet main
+}
+pc_widen=$(policy_branch widen widen.candidate.yaml)
+pc_addrule=$(policy_branch addrule addrule.candidate.yaml)
+pc_exclude=$(policy_branch exclude exclude.candidate.yaml)
+git -C "$policy_origin" checkout --quiet -b code "$pc_base"
+printf '// reviewed\n' >>"$policy_origin/pkg/b/b.go"
+commit_all "$policy_origin" code
+pc_code=$(git -C "$policy_origin" rev-parse HEAD)
+git -C "$policy_origin" checkout --quiet main
+m_widen=$(merge_commit "$policy_origin" "$pc_base" "$pc_widen" merge-widen)
+m_addrule=$(merge_commit "$policy_origin" "$pc_base" "$pc_addrule" merge-addrule)
+m_exclude=$(merge_commit "$policy_origin" "$pc_base" "$pc_exclude" merge-exclude)
+m_code=$(merge_commit "$policy_origin" "$pc_base" "$pc_code" merge-code)
+
+# policy_mount TARGET prints the host file the engine call mounted at TARGET.
+policy_mount() { jq -r --arg t "$1" '.options | [range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]]
+	| map(select(endswith(":" + $t + ":ro"))) | .[0] // "" | sub(":" + $t + ":ro$"; "")' <<<"$(engine_call config)"; }
+compare_calls() { jq -s 'map(select(.command == "run" and .args[0] == "config")) | length' "$FAKE_DOCKER_LOG"; }
+
+pinned=$(sed -n 's/^readonly SUPPORTED_ENGINE_VERSION=\([^ ]*\)$/\1/p' "$root/scripts/lib.sh")
+policy_change_from=$(sed -n 's/^readonly POLICY_CHANGE_FROM=\([^ ]*\)$/\1/p' "$root/scripts/lib.sh")
+
+begin "pull request that changes the policy, pinned engine that prints no classification: no comparison"
+on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
+start_app "[$ok_answer]"
+run_action "$policy_origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+expect_eq "no artifact" "" "$(out policy-change-file)"
+expect "the step summary says the engine does not classify yet" summary_has "Policy change: not classified: the pinned engine $pinned does not classify policy changes; the classification starts with $policy_change_from"
+
+if [[ $pinned == "$policy_change_from" ]]; then
+	begin "pull request that widens an allowlist: classified, archived and summarised"
+	on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
+	export FAKE_COMPARE=$fixtures/widen.json
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "the report is still sent" 1 "$(requests upload)"
+	expect "the engine compares the head policy against the base policy" json_ok \
+		'.args == ["config", "compare", "/candidate/.archfit.yaml", "-c", "/current/.archfit.yaml", "--root", "/src", "--json"]' \
+		"$(engine_call config)"
+	expect_eq "the candidate is the head's policy" "$(blob_sha256 "$policy_origin" "$pc_widen:.archfit.yaml")" "$(sha_of "$(policy_mount /candidate)/.archfit.yaml")"
+	expect_eq "the current is the base's policy" "$(blob_sha256 "$policy_origin" "$pc_base:.archfit.yaml")" "$(sha_of "$(policy_mount /current)/.archfit.yaml")"
+	expect_eq "the artifact is the engine's document, byte for byte" "$(sha_of "$fixtures/widen.json")" "$(sha_of "$(out policy-change-file)")"
+	expect "the step summary says what loosened" summary_has "Policy change: loosening: loosens 1, tightens 0, coverage lost 0"
+	expect "the verdict is the head's alone" test "$(out verdict)" = blocked
+
+	begin "pull request that adds a rule: tightening"
+	on_pull_request "$pc_addrule" "$pc_base" acme/shop "$m_addrule"
+	export FAKE_COMPARE=$fixtures/addrule.json
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect "the step summary says what tightened" summary_has "Policy change: tightening: loosens 0, tightens 1, coverage lost 0"
+
+	begin "pull request that excludes a source tree: coverage lost"
+	on_pull_request "$pc_exclude" "$pc_base" acme/shop "$m_exclude"
+	export FAKE_COMPARE=$fixtures/exclude.json
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect "the step summary counts the coverage lost" summary_has "Policy change: loosening: loosens 0, tightens 0, coverage lost 1"
+
+	begin "engine v3.2.3, which prints no policy-change section: archived, reported as not classified"
+	on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
+	export FAKE_COMPARE=$fixtures/widen.json FAKE_COMPARE_V32=true
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect "the step summary says the engine does not classify" summary_has "Policy change: not classified: engine v3.2.3 has no policy-change section"
+	expect "the document is archived" test -s "$(out policy-change-file)"
+
+	begin "the classification fails: a warning, the report is still sent"
+	on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
+	export FAKE_COMPARE_RC=3
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect "the warning names the exit" log_has "the policy change could not be classified (archfit exit 3)"
+	expect "the engine's reason is in the log" log_has "decode failed"
+	expect_eq "no policy-change artifact" "" "$(out policy-change-file)"
+	expect_eq "the report is still sent" 1 "$(requests upload)"
+
+	begin "pull request that leaves the policy unchanged: no classification"
+	on_pull_request "$pc_code" "$pc_base" acme/shop "$m_code"
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+	expect_eq "no artifact" "" "$(out policy-change-file)"
+
+	begin "pull request that changes no policy, while the base tip has tightened it since the branch: no classification"
+	git -C "$policy_origin" checkout --quiet -b code-late "$pc_base"
+	printf '// later\n' >>"$policy_origin/pkg/b/b.go"
+	commit_all "$policy_origin" code-late
+	pc_late=$(git -C "$policy_origin" rev-parse HEAD)
+	git -C "$policy_origin" checkout --quiet main
+	cp "$fixtures/addrule.candidate.yaml" "$policy_origin/.archfit.yaml"
+	commit_all "$policy_origin" "main tightens the policy after the branch"
+	pc_main=$(git -C "$policy_origin" rev-parse HEAD)
+	m_late=$(merge_commit "$policy_origin" "$pc_main" "$pc_late" merge-late)
+	on_pull_request "$pc_late" "$pc_main" acme/shop "$m_late"
+	export FAKE_COMPARE=$fixtures/addrule.json
+	start_app "[$ok_answer]"
+	run_action "$policy_origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+	expect "the step summary has no policy change" bash -c '! grep -q "Policy change" "$1"' _ "$GITHUB_STEP_SUMMARY"
+
+	begin "analysis-only pull request that makes .archfit.yaml a gitlink: not classified, the job still succeeds"
+	git -C "$policy_origin" checkout --quiet -b gitlink "$pc_base"
+	git -C "$policy_origin" rm --quiet .archfit.yaml
+	git -C "$policy_origin" update-index --add --cacheinfo "160000,$pc_base,.archfit.yaml"
+	git -C "$policy_origin" -c user.name=test -c user.email=test@example.com commit --quiet -m gitlink
+	pc_gitlink=$(git -C "$policy_origin" rev-parse HEAD)
+	git -C "$policy_origin" checkout --quiet main
+	on_pull_request "$pc_gitlink" "$pc_base" acme/shop
+	run_action "$policy_origin"
+	expect_eq "the job fails on the verdict (blocked), not on the classification" 1 "$action_rc"
+	expect "the failure is the verdict's" log_has "the architecture verdict is blocked"
+	expect "the step summary says the head's policy is not a regular file" summary_has "not classified: .archfit.yaml at the head is not a regular file"
+	expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
+	expect "the report is still produced" test "$(out artifact-name)" = archfit-report
+else
+	printf 'skip   policy-change classification: the pinned engine %s does not print it (%s)\n' "$pinned" "$policy_change_from"
+
+fi
+
+begin "push: no classification, whatever the policy change"
+on_push "$pc_widen"
+start_app "[$ok_answer]"
+run_action "$policy_origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
 
 begin "no-endpoint report-stage required-evidence regressions"
 expect "genuine optional attention passes; required gaps and malformed decisions fail" \

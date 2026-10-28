@@ -52,6 +52,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require git jq docker
 
 readonly TRUSTED_INPUTS=(.archfit.yaml .archfit-baseline.json .archfit-labels.yaml)
+# The engine's policy-change document (archfit.config-compare.v1) and the classification
+# section that only engines after v3.2.3 emit.
+readonly COMPARE_SCHEMA=archfit.config-compare.v1
+# extra_mounts holds the docker volumes a step adds to the engine call (policy change).
+extra_mounts=()
+policy_change_status=""
+policy_change_ready=false
 
 mode=${ARCHFIT_MODE:?}
 image_digest=${ARCHFIT_IMAGE_DIGEST:?}
@@ -194,6 +201,7 @@ engine() {
 	done
 	[[ ! -f $reference/.archfit-baseline.json ]] ||
 		mounts+=(--volume "$reference/.archfit-baseline.json:/reference/.archfit-baseline.json:ro")
+	mounts+=(${extra_mounts[@]+"${extra_mounts[@]}"})
 	# --base runs `git worktree add`, the one git write the engine makes. The host
 	# directory is only a mountpoint: docker cannot create it inside the read-only .git.
 	if [[ " $* " == *" --base "* ]]; then
@@ -408,6 +416,84 @@ write_facts() {
 	set_output verdict "$verdict"
 }
 
+# blob_at REV PATH prints the blob of a regular file at REV, or nothing when PATH is absent
+# there. A gitlink or a symlink at PATH prints nothing too, and the caller says so.
+blob_at() {
+	local entry fmode ftype oid
+	entry=$(git -C "$src" ls-tree "$1" -- "$2") || die "git ls-tree failed for $2 at $1"
+	[[ -n $entry ]] || return 0
+	read -r fmode ftype oid <<<"${entry%%$'\t'*}"
+	[[ $ftype == blob && ($fmode == 100644 || $fmode == 100755) ]] && printf '%s' "$oid"
+	return 0
+}
+
+# prepare_policy_change writes the two policy files a classification compares. It runs
+# before the engine container, so no git runs on the runner after a container has run. The
+# candidate is the head's file and the current the base tip's, and only when the pull
+# request itself changes the policy: merge base..head decides, as materialize does for
+# every trusted input. Off that, nothing is classified. The engine's comparison measures
+# both configurations in full, so it runs only where the engine prints the section.
+prepare_policy_change() {
+	local current=$work/policy-current candidate=$work/policy-candidate head_blob base_blob
+	policy_change_ready=false
+	[[ $event == pull_request ]] || return 0
+	if git -C "$src" diff --quiet --no-ext-diff "$merge_base" "$head" -- .archfit.yaml; then
+		return 0
+	fi
+	if [[ $pinned_version != "$POLICY_CHANGE_FROM" ]]; then
+		policy_change_status="not classified: the pinned engine $pinned_version does not classify policy changes; the classification starts with $POLICY_CHANGE_FROM"
+		return 0
+	fi
+	base_blob=$(blob_at "$input_tip" .archfit.yaml)
+	[[ -n $base_blob ]] || return 0 # no current policy to compare with
+	head_blob=$(blob_at "$head" .archfit.yaml)
+	if [[ -z $head_blob ]]; then
+		# A deleted policy is refused without an endpoint; with one the App decides.
+		[[ -z $(git -C "$src" ls-tree "$head" -- .archfit.yaml) ]] && return 0
+		policy_change_status="not classified: .archfit.yaml at the head is not a regular file"
+		return 0
+	fi
+	rm -rf "$current" "$candidate"
+	mkdir -p "$current" "$candidate"
+	git -C "$src" cat-file blob "$base_blob" >"$current/.archfit.yaml"
+	if labels_blob=$(blob_at "$input_tip" .archfit-labels.yaml) && [[ -n $labels_blob ]]; then
+		git -C "$src" cat-file blob "$labels_blob" >"$current/.archfit-labels.yaml"
+	fi
+	git -C "$src" cat-file blob "$head_blob" >"$candidate/.archfit.yaml"
+	policy_change_ready=true
+}
+
+# classify_policy_change runs the engine's classification of the files prepare_policy_change
+# wrote. The engine classifies from the two files' declarations and measures nothing new.
+# Report-only: a failure is a warning, the verdict is not affected, and nothing is sent to
+# the App; the document is an artifact.
+classify_policy_change() {
+	local rc=0 schema
+	[[ $policy_change_ready == true ]] || return 0
+	# The engine reads labels from the current file's directory, so that directory holds them.
+	extra_mounts=(--volume "$work/policy-current:/current:ro" --volume "$work/policy-candidate:/candidate:ro")
+	engine config compare /candidate/.archfit.yaml -c /current/.archfit.yaml --root /src --json \
+		>"$out/policy-change.json" 2>"$out/policy-change.err" || rc=$?
+	extra_mounts=()
+	if ((rc != 0)); then
+		print_fenced "archfit policy change error" "$out/policy-change.err"
+		warning "the policy change could not be classified (archfit exit $rc); see the log"
+		policy_change_status="not classified (archfit exit $rc)"
+		return 0
+	fi
+	schema=$(jq -r '.schema_version // ""' "$out/policy-change.json" 2>/dev/null) || schema=""
+	[[ $schema == "$COMPARE_SCHEMA" ]] ||
+		die "the policy-change document declares schema_version '$schema'; this action carries $COMPARE_SCHEMA"
+	set_output policy-change-file "$out/policy-change.json"
+	if ! jq -e 'has("policy_change")' "$out/policy-change.json" >/dev/null; then
+		policy_change_status="not classified: engine $engine_version has no policy-change section"
+		return 0
+	fi
+	policy_change_status=$(jq -r '.policy_change as $c
+		| "\($c.direction): loosens \(($c.rules_removed + $c.rules_loosened + $c.waivers_added + $c.allowlists_widened + $c.declarations_changed) | length), tightens \(($c.rules_added + $c.rules_tightened + $c.waivers_removed + $c.allowlists_narrowed + $c.coverage_gained) | length), coverage lost \($c.coverage_lost | length)"' \
+		"$out/policy-change.json")
+}
+
 write_summary() {
 	local what="\`$head\` ($event)"
 	if [[ $event == pull_request ]]; then
@@ -423,6 +509,7 @@ write_summary() {
 		"- Engine: $engine_version, $platform, \`$image_digest\`" \
 		"- Verdict: ${verdict:-none}"
 	[[ -z $origin ]] || summary "- Origin against the base: $origin"
+	[[ -z $policy_change_status ]] || summary "- Policy change: $policy_change_status"
 	summary ""
 	[[ -s $work/inputs.tsv ]] || return 0
 	summary "| Trusted input | From | Commit | SHA-256 |" "| --- | --- | --- | --- |"
@@ -453,8 +540,10 @@ report)
 	fi
 	engine_identity
 	payload=$out/archfit-state.json
+	prepare_policy_change
 	# origin_base is empty off pull requests, so push runs measure the commit alone.
 	check "$payload" "$origin_base"
+	classify_policy_change
 	kind=report artifact=archfit-report
 	;;
 discovery)
