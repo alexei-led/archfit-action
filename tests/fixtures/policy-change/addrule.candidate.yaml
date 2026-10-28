@@ -1,0 +1,37 @@
+version: 2
+modules:
+  a:
+    paths:
+      - pkg/a/**
+    owner: team-a
+    subdomain: supporting
+    volatility: medium
+  b:
+    paths:
+      - pkg/b/**
+    owner: team-b
+    subdomain: core
+    volatility: low
+rules:
+  - id: no_direct_a_dependency
+    type: forbidden_dependency
+    gate: fail
+    from: pkg/b/**
+    to: pkg/a/**
+  - id: no_direct_b_dependency
+    type: forbidden_dependency
+    gate: fail
+    from: pkg/a/**
+    to: pkg/b/**
+languages:
+  typescript:
+    enabled: false
+  python:
+    enabled: false
+analyzers:
+  scip:
+    enabled: false
+  clones:
+    enabled: false
+  syntax:
+    enabled: false

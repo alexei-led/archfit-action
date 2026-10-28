@@ -212,6 +212,33 @@ checkout as the first run left it. Analysed code can already change files during
 one run; the rerun gives it a whole run to do so. A `--base` run that hangs is
 bounded by the job's `timeout-minutes`, like any engine run.
 
+## Policy change
+
+When a pull request changes `.archfit.yaml`, the action asks the engine what the
+change does to what blocks: `archfit config compare <head policy> -c <base policy>
+--json` (`archfit.config-compare.v1`). The head's file is the candidate, because it
+is what an owner would approve; the base tip's file is the current policy. The
+classification reads the two files' declarations. The comparison around it still
+measures the tree under both policies, so it takes as long as two analyses.
+
+The document is kept as the `archfit-policy-change` artifact, byte for byte as the
+engine printed it, and the step summary gives its direction and counts:
+
+- `loosens`: rules removed or loosened, waivers added, allowlists widened;
+- `tightens`: the mirror of those lists;
+- `coverage lost`: source that is no longer measured (an exclude added, a language
+  or analyzer turned off, a module or its paths removed).
+
+The action runs the comparison only with an engine that prints the classification:
+v3.4.0 and later. With the pinned v3.2.3 it does not run, and the summary says so.
+The release that moves the pin to v3.4.0 turns it on.
+
+This section is report-only. A failed classification is a warning, the verdict and
+the exit code are unchanged, and nothing is sent to the App: the App's policy
+change card reads the classification once the App accepts it. A pull request that
+does not change `.archfit.yaml`, every `push` and every `workflow_dispatch` run skip
+it.
+
 ## The envelope
 
 The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 18 flat

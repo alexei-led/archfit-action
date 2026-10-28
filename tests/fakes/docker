@@ -21,6 +21,9 @@
 #                             worktree in the checkout, as a killed engine does, and writes
 #                             /bundle/.archfit-baseline.json, as analysed code can
 #   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
+#   FAKE_COMPARE              file that `config compare` prints (default: tests/fixtures/policy-change/widen.json)
+#   FAKE_COMPARE_V32          true removes policy_change, as engine v3.2.3 prints
+#   FAKE_COMPARE_RC           exit code of `config compare` (default 0); non-zero prints an engine reason on stderr
 #   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees,
 #                             and a failed `check --base` makes /bundle read-only after its plant
 #
@@ -164,6 +167,18 @@ check)
 	exit "${FAKE_CHECK_RC:-$(jq -r '{healthy: 0, blocked: 1, needs_attention: 2}[.verdict] // 3' "$FAKE_STATE")}"
 	;;
 config)
+	if [[ ${2:-} == compare ]]; then
+		if [[ -n ${FAKE_COMPARE_RC:-} && ${FAKE_COMPARE_RC} != 0 ]]; then
+			echo "error: candidate config: decode failed" >&2
+			exit "$FAKE_COMPARE_RC"
+		fi
+		if [[ ${FAKE_COMPARE_V32:-} == true ]]; then
+			jq 'del(.policy_change)' "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"
+		else
+			cat "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"
+		fi
+		exit 0
+	fi
 	cat "${FAKE_DRAFT:?}"
 	;;
 baseline)
