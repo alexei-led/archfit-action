@@ -14,6 +14,8 @@
     "head_sha",
     "base_sha",
     "merge_base_sha",
+    "analyzed_sha",
+    "integration",
     "run_id",
     "run_attempt",
     "engine_version",
@@ -52,6 +54,15 @@
       "description": "Empty unless event is pull_request.",
       "pattern": "^([0-9a-f]{40})?$"
     },
+    "analyzed_sha": {
+      "type": "string",
+      "description": "The commit the engine measured: the pull request's test merge commit when integration is merged, else head_sha.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "integration": {
+      "enum": ["", "merged", "conflicts"],
+      "description": "How a pull request lands: merged (analyzed_sha is the test merge commit of head_sha into base_sha) or conflicts (the event reports a conflict; analyzed_sha is head_sha). Empty unless event is pull_request."
+    },
     "run_id": { "type": "integer", "minimum": 1 },
     "run_attempt": { "type": "integer", "minimum": 1 },
     "engine_version": { "type": "string", "pattern": "^[A-Za-z0-9._+-]{1,64}$" },
@@ -87,14 +98,16 @@
         "properties": {
           "pull_request": { "minimum": 1 },
           "base_sha": { "pattern": "^[0-9a-f]{40}$" },
-          "merge_base_sha": { "pattern": "^[0-9a-f]{40}$" }
+          "merge_base_sha": { "pattern": "^[0-9a-f]{40}$" },
+          "integration": { "enum": ["merged", "conflicts"] }
         }
       },
       "else": {
         "properties": {
           "pull_request": { "const": 0 },
           "base_sha": { "const": "" },
-          "merge_base_sha": { "const": "" }
+          "merge_base_sha": { "const": "" },
+          "integration": { "const": "" }
         }
       }
     },

@@ -564,6 +564,17 @@ mutate baseline-with-baseline-digest '.baseline_digest = ("5b" * 32)' "$tmp/base
 mutate baseline-with-pull-request '.pull_request = 42' "$tmp/baseline.envelope"
 mutate baseline-with-base-sha ".base_sha = \"$c1\"" "$tmp/baseline.envelope"
 mutate baseline-with-prefixed-labels-digest '.labels_digest = "sha256:" + .labels_digest' "$tmp/baseline.envelope"
+mutate missing-analyzed-sha 'del(.analyzed_sha)'
+mutate missing-integration 'del(.integration)'
+mutate empty-analyzed-sha '.analyzed_sha = ""'
+mutate short-analyzed-sha '.analyzed_sha |= .[0:39]'
+mutate uppercase-analyzed-sha '.analyzed_sha |= ascii_upcase'
+mutate unknown-integration '.integration = "rebased"'
+mutate pull-request-without-integration '.integration = ""'
+mutate baseline-with-integration '.integration = "merged"' "$tmp/baseline.envelope"
+mutate baseline-without-analyzed-sha '.analyzed_sha = ""' "$tmp/baseline.envelope"
+jq -cj '.integration = "conflicts" | .analyzed_sha = .head_sha' "$reference" >"$case_dir/conflicts.envelope"
+expect "a conflicting pull request's envelope is valid" valid_envelope "$case_dir/conflicts.envelope" ""
 edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
 edit fraction-attempt '"run_attempt":1,' '"run_attempt":1.0,'
 edit duplicate-key '"labels_digest"' "\"head_sha\":\"$f1\",\"labels_digest\""
