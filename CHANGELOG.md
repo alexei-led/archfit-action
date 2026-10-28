@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.0.0
+
+### Changed
+
+- Pull requests are analysed as they would land. The run checks out GitHub's
+  test merge commit of the head into the base, so a change that is clean alone
+  but breaks the architecture once merged is measured. The head is still the
+  commit approval binds to.
+- The envelope gains `analyzed_sha` (the commit measured) and `integration`
+  (`merged` or `conflicts`). Off pull requests `analyzed_sha` equals `head_sha`
+  and `integration` is empty. The envelope keeps its version string.
+- A pull request GitHub reports as conflicting is analysed as its head alone
+  (`integration: conflicts`).
+- The merge commit must have the event's base and head as parents, or the run
+  fails before the engine starts.
+- On a merged pull request, origin compares with the event's base commit. The
+  merge base is used when the head is analysed alone.
+- A pull request that changes `.archfit.yaml` gets the engine's classification of
+  the policy change: the `archfit-policy-change` artifact and a step-summary line
+  (`loosens`, `tightens`, coverage lost). Report-only: a failure is a warning, the
+  verdict is unchanged, and nothing is sent to the App yet. The comparison runs
+  only with engine v3.4.0 or later, which prints the classification; with an
+  earlier engine the summary says the policy change is not classified.
+- Concurrency for hand-written workflows is documented in the README.
+
+### Upgrade
+
+- Use the pinned engine version and its per-platform image digest together, as
+  listed for this release. Older engine versions are refused.
+- The App must accept the 18-key envelope before the action reports to it. A
+  pull request's verdict covers the merged tree, so it can report findings the
+  target already has that are not accepted in the baseline. Origin marks the
+  findings the pull request introduced.
+- The action's inputs are unchanged. The engine release notes list the policy and
+  baseline changes.
+
 ## v2.2.1
 
 ### Changed
