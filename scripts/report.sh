@@ -50,11 +50,13 @@ fi
 [[ -n $kind ]] || exit 0 # nothing was measured; run.sh said why
 [[ -f $payload ]] || die "payload $payload is missing"
 
-# envelope prints the 18 keys of archfit.report-envelope.v1 on one line, typed as the
-# App decodes them: integers for pull_request, run_id and run_attempt, sha256:-prefixed
-# payload and image digests, bare hex input digests ("" = the engine read no such file).
+# envelope [WITH_POLICY_CHANGE] prints the 18 keys of archfit.report-envelope.v1 on one
+# line, typed as the App decodes them: integers for pull_request, run_id and run_attempt,
+# sha256:-prefixed payload and image digests, bare hex input digests ("" = the engine read
+# no such file). With WITH_POLICY_CHANGE it adds the optional policy_change: the engine's
+# classification of a pull request's policy change, when one was made.
 envelope() {
-	local digest
+	local digest with=${1:-false}
 	[[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]{0,18}$ ]] || die "GITHUB_RUN_ID is not a run ID"
 	[[ ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]{0,8}$ ]] || die "GITHUB_RUN_ATTEMPT is not an attempt number"
 	digest=$(sha256_hex "$payload") || die "cannot hash $payload"
@@ -63,15 +65,24 @@ envelope() {
 		--argjson run_id "$GITHUB_RUN_ID" \
 		--argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
 		--arg payload_digest "sha256:$digest" \
+		--argjson with "$with" \
 		'{schema_version: "archfit.report-envelope.v1", kind, repository: $repository, event,
 		  pull_request, head_sha, base_sha, merge_base_sha, analyzed_sha, integration,
 		  run_id: $run_id, run_attempt: $run_attempt,
 		  engine_version, image_digest, platform,
-		  payload_digest: $payload_digest, baseline_digest, labels_digest}' "$facts"
+		  payload_digest: $payload_digest, baseline_digest, labels_digest}
+		  + (if $with and .policy_change != null then {policy_change} else {} end)' "$facts"
 }
 
 envelope_file=$work/envelope.json
-envelope >"$envelope_file"
+envelope true >"$envelope_file"
+# The envelope travels in one header the App caps. The classification is report-only, so a
+# policy change too large to fit is left out rather than losing the upload; the App sees
+# the protected-file change in the pull request itself.
+if (($(wc -c <"$envelope_file") > ENVELOPE_MAX_BYTES)); then
+	warning "the policy-change classification does not fit in the envelope (at most $ENVELOPE_MAX_BYTES bytes); it is sent without it and kept in the archfit-policy-change artifact"
+	envelope >"$envelope_file"
+fi
 set_output envelope-file "$envelope_file"
 
 if [[ -z $endpoint ]]; then
