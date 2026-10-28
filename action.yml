@@ -107,6 +107,16 @@ runs:
         include-hidden-files: true
         overwrite: true
 
+    # The policy-change classification of a pull request. A separate artifact: the App's
+    # archfit-report artifact keeps exactly the report bytes.
+    - if: steps.run.outputs.policy-change-file != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: archfit-policy-change
+        path: ${{ steps.run.outputs.policy-change-file }}
+        if-no-files-found: error
+        overwrite: true
+
     - id: report
       shell: bash
       env:
