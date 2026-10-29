@@ -25,13 +25,18 @@ inputs:
     required: false
     default: ""
   engine-version:
-    description: Engine release of the image, for example v3.4.0. The action refuses an image that reports another version.
-    required: true
+    description: >-
+      Engine release of the image, for example v3.4.0. Empty means the engine this
+      action release pins. The action refuses an image that reports another version.
+    required: false
+    default: ""
   image-digest:
     description: >-
       Per-platform manifest digest of ghcr.io/alexei-led/archfit (sha256:<64 hex>),
-      as listed in the App's manifest. Tags are refused.
-    required: true
+      as listed in the App's manifest. Empty means the digest this action release
+      pins for the runner's platform. Tags are refused.
+    required: false
+    default: ""
   mode:
     description: >-
       report (measure and upload the state), discovery (propose a first policy),
@@ -90,8 +95,8 @@ runs:
       env:
         ARCHFIT_MODE: ${{ steps.prepare.outputs.mode }}
         ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
-        ARCHFIT_ENGINE_VERSION: ${{ inputs.engine-version }}
-        ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
+        ARCHFIT_ENGINE_VERSION: ${{ steps.prepare.outputs.engine-version }}
+        ARCHFIT_IMAGE_DIGEST: ${{ steps.prepare.outputs.image-digest }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/run.sh"
 
     # Before the upload, so the result survives a failed upload. archfit-report is the

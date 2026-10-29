@@ -130,6 +130,10 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   file against the base tip's. The object goes verbatim into the envelope's optional
   `policy_change`, and is left out over the 8192-byte cap, never truncated. Its failure
   never changes the verdict, the exit code or the upload.
+- **The release pins the engine.** `engine-version` and `image-digest` are optional:
+  omitted, they are `SUPPORTED_ENGINE_VERSION` and the per-platform digest in `lib.sh`
+  for `RUNNER_ARCH`, so a consumer upgrades with one action-commit bump. Given, they
+  are checked exactly as before. A pin PR moves the version and both digests together.
 - **Analyzer identity is part of the result.** Pin the image by its per-platform digest.
   Never suggest `:latest` or a tag. The image platform must equal the runner's
   (`RUNNER_ARCH`); `engine_version` must equal the input. Both are checked before analysis.

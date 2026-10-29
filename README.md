@@ -11,7 +11,8 @@ upload. Nothing is analyzed on archfit's servers.
 ## Usage
 
 The archfit App generates this workflow during onboarding. It pins the action by
-commit and the engine image by digest:
+commit. The action release pins the engine: v3.4.0 and its per-platform image
+digest, so the workflow names no engine:
 
 ```yaml
 name: archfit
@@ -35,17 +36,40 @@ jobs:
   archfit:
     runs-on: ubuntu-latest
     steps:
-      - uses: alexei-led/archfit-action@<40-hex commit>
+      - uses: alexei-led/archfit-action@<40-hex commit> # v3.1.0
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
-          engine-version: "v3.4.0"
-          image-digest: "sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b"
           mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
 ```
 
 Do not add a checkout step: the action does its own, without persisted
 credentials.
+
+`engine-version` and `image-digest` are optional. Omitted, they are the engine this
+action release pins, with the digest for the runner's platform (X64 or ARM64). Set
+them only to state the pin in the workflow too; then each must match this release's
+engine, or the job fails before the checkout, as before.
+
+### Upgrades with Dependabot
+
+The action commit names the engine, so one commit bump upgrades both. Pin the
+action by its full commit SHA with the version tag in a comment, as above, and let
+Dependabot propose the bumps:
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+```
+
+Dependabot rewrites the SHA and the `# v3.1.0` comment together. The App accepts
+only the action commits and engine digests its manifest lists, so merge a bump
+after the App lists that release; a report from an unlisted commit is refused.
 
 Without `endpoint` the action analyzes only: nothing is sent, the report or the
 captured baseline is a workflow artifact. For reports, this job is the local gate:
@@ -137,8 +161,8 @@ baseline and reanchor (a reanchor also keeps the engine's report there).
 | --- | --- | --- |
 | `endpoint` | *(empty)* | App base URL (`https`, no trailing slash). The action appends `/v1/reports`, `/v1/discoveries`, `/v1/baselines` or `/v1/reanchors`. Empty means analyze only. |
 | `audience` | *(empty)* | OIDC audience. Empty means `endpoint`, verbatim. The App accepts exactly its base URL. |
-| `engine-version` | *(required)* | Engine release of the image, for example `v3.4.0`. An image that reports another version is refused. |
-| `image-digest` | *(required)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Tags are refused. |
+| `engine-version` | *(empty)* | Engine release of the image, for example `v3.4.0`. Empty means the engine this action release pins. An image that reports another version is refused. |
+| `image-digest` | *(empty)* | Per-platform manifest digest of `ghcr.io/alexei-led/archfit` (`sha256:<64 hex>`). Empty means this release's digest for the runner's platform. Tags are refused. |
 | `mode` | *(empty)* | `report`, `discovery`, `baseline` or `reanchor`. Empty means `report`. |
 
 ## Outputs

@@ -78,11 +78,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No engine inputs: the consumer form, with the engine this release pins.
       - id: archfit
         uses: ./
-        with:
-          engine-version: v3.4.0
-          image-digest: sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
       - name: Nothing was measured or sent
         env:
           VERDICT: ${{ steps.archfit.outputs.verdict }}

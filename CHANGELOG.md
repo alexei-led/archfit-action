@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.1.0
+
+### Changed
+
+- `engine-version` and `image-digest` are optional. Omitted, they are the engine
+  this release pins: v3.4.0, `linux/amd64`
+  `sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b` or
+  `linux/arm64` `sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f`,
+  by the runner's architecture. Given, they are checked as before.
+- The README shows the minimal workflow and a Dependabot `github-actions` entry:
+  one action commit bump now upgrades the engine too.
+
+### Upgrade
+
+- Drop `engine-version` and `image-digest` from the workflow, or keep them at
+  v3.4.0 and the digest for the runner. The envelope and its schema are unchanged.
+
 ## v3.0.0
 
 ### Changed

@@ -807,6 +807,67 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
+# --- Engine inputs omitted: the engine this action release pins ---------------------
+
+readonly BAKED_ARM64=sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f
+readonly BAKED_AMD64=sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
+
+begin "engine-version and image-digest omitted on X64: the pinned engine and its amd64 digest"
+on_push "$c2"
+unset ARCHFIT_ENGINE_VERSION ARCHFIT_IMAGE_DIGEST
+export RUNNER_ARCH=X64 FAKE_PLATFORM=linux/amd64
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "prepare resolves the version" v3.4.0 "$(out engine-version)"
+expect_eq "prepare resolves the amd64 digest" "$BAKED_AMD64" "$(out image-digest)"
+expect_eq "the envelope names them" "v3.4.0 $BAKED_AMD64 linux/amd64" \
+	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+expect "the image is pulled by that digest" json_ok \
+	'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$BAKED_AMD64"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+
+begin "engine-version and image-digest omitted on ARM64: the arm64 digest"
+on_push "$c2"
+unset ARCHFIT_ENGINE_VERSION ARCHFIT_IMAGE_DIGEST
+export RUNNER_ARCH=ARM64 FAKE_PLATFORM=linux/arm64
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the envelope names the arm64 digest" "v3.4.0 $BAKED_ARM64 linux/arm64" \
+	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+
+begin "image-digest omitted on a runner without an engine image: refused before the checkout"
+on_push "$c2"
+unset ARCHFIT_IMAGE_DIGEST
+export RUNNER_ARCH=X86
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the architecture" log_has "runner architecture 'X86' has no engine image"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+
+begin "engine-version given and wrong, image-digest omitted: refused before the checkout"
+on_push "$c2"
+unset ARCHFIT_IMAGE_DIGEST
+export ARCHFIT_ENGINE_VERSION=v3.3.0
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the one supported engine" log_has "this action runs engine v3.4.0 only"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+
+begin "image-digest given for another platform, engine-version omitted: refused before analysis"
+on_push "$c2"
+unset ARCHFIT_ENGINE_VERSION
+export ARCHFIT_IMAGE_DIGEST=$BAKED_ARM64 FAKE_PLATFORM=linux/arm64
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names both platforms" log_has "built for linux/arm64, but this runner is linux/amd64"
+expect_eq "no container ran" 0 "$(engine_calls)"
+
+begin "the baked digests are the per-platform digests this release pins"
+expect "lib.sh pins the amd64 digest" grep -qF "readonly ENGINE_DIGEST_AMD64=$BAKED_AMD64" "$root/scripts/lib.sh"
+expect "lib.sh pins the arm64 digest" grep -qF "readonly ENGINE_DIGEST_ARM64=$BAKED_ARM64" "$root/scripts/lib.sh"
+
 prepare_with_endpoint() { # ENDPOINT: run prepare.sh alone; sets action_rc
 	on_push "$c2"
 	action_rc=0

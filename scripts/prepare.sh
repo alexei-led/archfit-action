@@ -8,8 +8,18 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require jq
 [[ -f ${GITHUB_EVENT_PATH:-} ]] || die "GITHUB_EVENT_PATH is not set; run this action in a GitHub Actions job"
 
-engine_version=${ARCHFIT_ENGINE_VERSION:-}
+# An omitted engine-version or image-digest means the engine this action release pins,
+# so a consumer upgrades engine and action with one commit bump. A given one is checked
+# as before.
+engine_version=${ARCHFIT_ENGINE_VERSION:-$SUPPORTED_ENGINE_VERSION}
 image_digest=${ARCHFIT_IMAGE_DIGEST:-}
+if [[ -z $image_digest ]]; then
+	case ${RUNNER_ARCH:-} in
+	X64) image_digest=$ENGINE_DIGEST_AMD64 ;;
+	ARM64) image_digest=$ENGINE_DIGEST_ARM64 ;;
+	*) die "runner architecture '${RUNNER_ARCH:-unset}' has no engine image (X64, ARM64); set image-digest only if the App's manifest lists one for it" ;;
+	esac
+fi
 endpoint=${ARCHFIT_ENDPOINT:-}
 mode=${ARCHFIT_MODE:-}
 
@@ -79,5 +89,7 @@ rm -rf "$work"
 mkdir -p "$work"
 
 set_output mode "$mode"
+set_output engine-version "$engine_version"
+set_output image-digest "$image_digest"
 set_output ref "$ref"
 printf 'archfit: mode=%s event=%s commit=%s%s\n' "$mode" "$event" "$ref" "${integration:+ integration=$integration}"
