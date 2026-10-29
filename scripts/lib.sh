@@ -6,6 +6,10 @@
 readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 # The only engine release this action runs (the App's manifest names its image digests).
 readonly SUPPORTED_ENGINE_VERSION=v3.4.0
+# Its per-platform manifest digests, used when the workflow names no image-digest. The
+# multi-arch index digest is never used: the App's manifest lists one digest per platform.
+readonly ENGINE_DIGEST_AMD64=sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
+readonly ENGINE_DIGEST_ARM64=sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f
 # The engine state contract this action carries (`archfit check --json`).
 readonly STATE_SCHEMA=archfit.architecture-state.v1
 

@@ -159,12 +159,14 @@ checkout() {
 
 # run_action ORIGIN runs the action's steps as action.yml wires them; the artifact
 # upload in between is GitHub's own action. Sets action_rc; the log is $case_dir/log.
+# The run step gets the engine prepare resolved, as action.yml passes it.
 run_action() {
 	action_rc=0
 	{
 		bash "$root/scripts/prepare.sh" &&
 			checkout "$1" "$(out ref)" &&
-			ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh" &&
+			ARCHFIT_MODE=$(out mode) ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) \
+				bash "$root/scripts/run.sh" &&
 			ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
 	} >"$case_dir/log" 2>&1 || action_rc=$?
 }
