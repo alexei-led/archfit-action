@@ -34,18 +34,21 @@
 # of the run (GITHUB_SHA on refs/pull/N/merge), or the head when the event reports
 # conflicts. The head stays the commit approval binds to. The merge commit must have
 # exactly the event's base and head as parents, else the run fails: the job context
-# only says where to look, the event says what it must be.
+# only says where to look, the event says what it must be. A merge group is analysed
+# at the event's merge_group.head_sha, which prepare.sh checked against the job's
+# GITHUB_SHA and GITHUB_REF; its base must be an ancestor of it and of the default branch.
 #
-# Origin. On a pull request the check also runs with --base: the engine checks that
-# commit out in a temporary worktree and marks every finding introduced,
-# pre_existing or unknown (comparison.origin_status, introduced_finding_ids). The
-# commit is the event's base for a merge commit, which already holds the target's own
-# changes, and the merge base when the head is analysed. That is
-# report-only: the verdict and exit code are the head's alone. `git worktree add`
-# writes .git/worktrees/<name>, so for that run one empty RUNNER_TEMP directory is
-# mounted writable over /src/.git/worktrees; the rest of .git stays read-only, and
-# host git never reads that directory. The worktree itself goes under
-# /src/.archfit-cache/worktrees, which the action deletes after the container exits.
+# Origin. On a pull request or a merge group the check also runs with --base: the
+# engine checks that commit out in a temporary worktree and marks every finding
+# introduced, pre_existing or unknown (comparison.origin_status,
+# introduced_finding_ids). The commit is the event's base for a merge commit, which
+# already holds the target's own changes, the merge base when the head is analysed, and
+# the event's base for a merge group. That is report-only: the verdict and exit code
+# are the analysed commit's alone. `git worktree add` writes .git/worktrees/<name>, so
+# for that run one empty RUNNER_TEMP directory is mounted writable over
+# /src/.git/worktrees; the rest of .git stays read-only, and host git never reads that
+# directory. The worktree itself goes under /src/.archfit-cache/worktrees, which the
+# action deletes after the container exits.
 # A --base run that does not end in a verdict is run again without --base: the
 # report then has no origin, and the log says so.
 set -euo pipefail
@@ -191,7 +194,8 @@ assert_no_credentials() {
 }
 
 # materialize PATH [DIR] writes the trusted copy of PATH into DIR (the inputs directory
-# by default) and records where it came from (base or head on a pull request, else ref).
+# by default) and records where it came from: base or head on a pull request, group or
+# base on a merge group, else ref.
 # A PATH absent at the chosen commit leaves no file and an empty digest.
 materialize() {
 	local path=$1 dir=${2:-$inputs} rev=$input_tip from=ref rc=0 entry fmode ftype oid digest=""
@@ -583,7 +587,7 @@ report)
 	engine_identity
 	payload=$out/archfit-state.json
 	prepare_policy_change
-	# origin_base is empty off pull requests, so push runs measure the commit alone.
+	# origin_base is empty off pull requests and merge groups, so push runs measure the commit alone.
 	check "$payload" "$origin_base"
 	classify_policy_change
 	kind=report artifact=archfit-report

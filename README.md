@@ -250,6 +250,11 @@ and the group fails by GitHub's timeout. It never passes.
 Only the default branch's queue is supported. Fork pull requests stay
 unsupported, in a group as on their own.
 
+A group whose commit has no `.archfit.yaml` measures nothing and sends nothing, as
+on a pull request. The App's check on the group then stays pending until GitHub's
+timeout fails the group. To retire archfit, first remove its required check from the
+branch rule, then merge the pull request that deletes the policy.
+
 ## Origin on pull requests
 
 On a `pull_request` run, the report check runs with `--base <base>`. A merge

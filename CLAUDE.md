@@ -85,7 +85,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   outside every mount.
 - **Origin is report-only, and its one git write is fenced.** A pull request report runs
   `check --base <base_sha>` on a merge commit (it already holds the target's changes)
-  and `--base <merge_base>` when the head is analysed alone; push, dispatch and the baseline self-checks do not. For
+  and `--base <merge_base>` when the head is analysed alone; a merge group report runs
+  `--base <merge_group.base_sha>`; push, dispatch and the baseline self-checks do not. For
   that run only, an empty `RUNNER_TEMP` directory is mounted writable over
   `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
   the host directory is a mountpoint created beforehand). After the container exits,

@@ -442,7 +442,7 @@ done
 
 # --- Merge groups: the group commit the event names, inputs from its immutable base -----
 
-begin "code-only merge group: the group commit is analysed, every input from the event's base"
+begin "code-only merge group: the group commit is analysed, every input read at the group commit"
 on_merge_group "$gc" "$c2"
 start_app "[$ok_answer]"
 run_action "$origin"
