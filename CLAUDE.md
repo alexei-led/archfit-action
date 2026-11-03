@@ -53,13 +53,21 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   event's `pull_request.base.sha` (the App compares it with the API's `base.sha`);
   `merge_base_sha` is the single `git merge-base --all` of that and head (several =
   criss-cross, refused). Off pull requests `analyzed_sha` is `head_sha` and
-  `integration` is "".
+  `integration` is "". A merge group is analysed at the event's `merge_group.head_sha`
+  (= `GITHUB_SHA`, and `GITHUB_REF` = `head_ref`, else refused before checkout); the
+  event's `base_sha` must be an ancestor of it and of the fetched default branch. Its
+  envelope (App contract revision 1, `docs/design/merge-queue.md`) has `pull_request`
+  0, empty `base_sha`/`merge_base_sha`/`integration`, no `policy_change`: the App
+  reads the queue and the members from GitHub. The queue branch name is never parsed.
 - **Trusted inputs come from git blobs, per file.** On a pull request reported to the
   App a file comes from head when merge-base..head changes it, else from the base tip.
   Without an endpoint nobody checks owner approval, so every file comes from the base
-  tip, and a head that deletes the policy fails. Push and dispatch read the run's
-  commit. Digests are taken before the container starts. Never read them from the
-  working tree (eol rules change the bytes).
+  tip, and a head that deletes the policy fails. A merge group reported to the App
+  reads every file at the group commit (the App attributes changed blobs to approved
+  members); without an endpoint every file comes from the event's `base_sha` and a
+  group that deletes the policy fails. Push and dispatch read the run's commit.
+  Digests are taken before the container starts. Never read them from the working
+  tree (eol rules change the bytes).
 - **No credentials are forwarded.** Only fixed HOME and checkout-scoped Git settings
   enter the container. `safe.directory=/src` is command-environment config, never
   host/global config or wildcard trust. No `--env-file`, no bare `-e NAME` (it copies
@@ -77,7 +85,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   outside every mount.
 - **Origin is report-only, and its one git write is fenced.** A pull request report runs
   `check --base <base_sha>` on a merge commit (it already holds the target's changes)
-  and `--base <merge_base>` when the head is analysed alone; push, dispatch and the baseline self-checks do not. For
+  and `--base <merge_base>` when the head is analysed alone; a merge group report runs
+  `--base <merge_group.base_sha>`; push, dispatch and the baseline self-checks do not. For
   that run only, an empty `RUNNER_TEMP` directory is mounted writable over
   `/src/.git/worktrees` (`git worktree add` writes there and nowhere else in `.git`;
   the host directory is a mountpoint created beforehand). After the container exits,
@@ -87,10 +96,12 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   and make it undeletable) and warns that origin is missing; it never fails the job by
   itself, cleanup included. No watchdog: the job's `timeout-minutes` bounds a hang.
   The envelope does not carry origin.
-- **Only the events the App accepts.** `pull_request`, `push` and `workflow_dispatch`;
-  every other event (`workflow_run`, `pull_request_target`, `merge_group`) is refused
-  in `prepare.sh` before the checkout. A `workflow_dispatch` report is refused too (the
-  App's `eligible()` table); dispatch runs discovery, baseline or reanchor.
+- **Only the events the App accepts.** `pull_request`, `push`, `merge_group` and
+  `workflow_dispatch`; every other event (`workflow_run`, `pull_request_target`) is
+  refused in `prepare.sh` before the checkout. `merge_group` only with action
+  `checks_requested`, `base_ref` = the default branch, mode report. A
+  `workflow_dispatch` report is refused too (the App's `eligible()` table); dispatch
+  runs discovery, baseline or reanchor.
 - **The endpoint is https and exact.** No trailing slash (it is also the OIDC audience);
   plain http only for 127.0.0.1/localhost. App answer fields are printed only when they
   match their documented shape.
@@ -99,8 +110,9 @@ The design plan lives in `archfit-app` under `docs/plans/`.
 - **Nested actions are pinned by full commit SHA**, with the tag in a comment. The App
   pins this action by commit; a tag inside it would make that commit's behaviour mutable.
 - **Retries only on 429, 5xx and no answer.** 409 on a report or draft is superseded
-  (exit 0): the newer run uploads its own. 409 on a baseline or re-anchor (`stale_head`,
-  `stale_attempt`) fails the job with "dispatch again": nothing re-proposes it. Every other answer is final. `Retry-After` counts only as 1-4 decimal digits;
+  (exit 0): the newer run uploads its own; for a merge group `stale_group` means the
+  group is gone and the App writes nothing for it. 409 on a baseline or re-anchor
+  (`stale_head`, `stale_attempt`) fails the job with "dispatch again": nothing re-proposes it. Every other answer is final. `Retry-After` counts only as 1-4 decimal digits;
   else backoff.
 - **A baseline is proposed, never committed.** With an endpoint, baseline mode posts the
   captured `.archfit-baseline.json` bytes (at most 1 MiB, `application/json`) to
@@ -125,8 +137,8 @@ The design plan lives in `archfit-app` under `docs/plans/`.
   use `--refresh`; never remove it to hide a comparability or evidence failure.
 - **One engine.** The Action runs engine v3.4.0 only. Older engines, schemas and
   envelope shapes are refused, not adapted (no users yet; see the v2.0.0 release notes).
-- **The policy-change classification is report-only.** On a pull request that changes
-  `.archfit.yaml` (merge base..head) the action runs `config compare` with the head's
+- **The policy-change classification is report-only.** Never on a merge group. On a
+  pull request that changes `.archfit.yaml` (merge base..head) the action runs `config compare` with the head's
   file against the base tip's. The object goes verbatim into the envelope's optional
   `policy_change`, and is left out over the 8192-byte cap, never truncated. Its failure
   never changes the verdict, the exit code or the upload.

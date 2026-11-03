@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.1.1
+
+### Added
+
+- Merge queue support for the default branch. On `merge_group` (`checks_requested`,
+  `report` mode) the action analyses exactly the event's `merge_group.head_sha`, the
+  commit GitHub requires the check on. Another branch's queue, action or mode is
+  refused before the checkout.
+- The run's `GITHUB_SHA` and `GITHUB_REF` must equal the event's `head_sha` and
+  `head_ref`, and the event's `base_sha` must be an ancestor of the group commit and
+  of the default branch. The queue branch name is never parsed.
+- Trusted inputs: with an endpoint, the group commit's blobs (the App accepts a
+  changed file only from an owner-approved queued pull request). Without one, the
+  event's base commit: a queued policy change has no effect, and deleting the policy
+  fails. Origin compares with the event's base; no policy classification runs.
+- The envelope (App contract revision 1) has `event: merge_group`, `pull_request` 0,
+  `head_sha` = `analyzed_sha` = the group commit, and empty `base_sha`,
+  `merge_base_sha` and `integration`. `409 stale_group` is a notice, not a failure.
+- `schema/SCHEMA_SOURCE` names App revision `5360dbd`. Schema bytes unchanged.
+
+### Upgrade
+
+- Add `merge_group: { types: [checks_requested] }` to the workflow triggers when the
+  default branch has a merge queue. The App needs the **Merge queues: Read**
+  permission and the **Merge group** event; without them a group upload answers `503`
+  and the group fails by timeout, never passes. Other events are unchanged.
+
 ## v3.1.0
 
 ### Changed

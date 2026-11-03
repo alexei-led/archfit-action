@@ -20,6 +20,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       mode:
@@ -36,7 +38,7 @@ jobs:
   archfit:
     runs-on: ubuntu-latest
     steps:
-      - uses: alexei-led/archfit-action@<40-hex commit> # v3.1.0
+      - uses: alexei-led/archfit-action@<40-hex commit> # v3.1.1
         with:
           endpoint: "https://<archfit App>"
           audience: "https://<archfit App>"
@@ -67,7 +69,7 @@ updates:
       interval: weekly
 ```
 
-Dependabot rewrites the SHA and the `# v3.1.0` comment together. The App accepts
+Dependabot rewrites the SHA and the `# v3.1.1` comment together. The App accepts
 only the action commits and engine digests its manifest lists, so merge a bump
 after the App lists that release; a report from an unlisted commit is refused.
 
@@ -81,16 +83,17 @@ list is valid; an explicit `null` or a non-array is not. This local gate is not 
 approval. No App checks that a policy owner approved a pull request's change to
 the policy, baseline or labels, so a pull request is measured against the base
 branch's files only. Its own edits to them have no effect, and a pull request that
-deletes `.archfit.yaml` fails.
+deletes `.archfit.yaml` fails. A merge group is measured the same way, against the
+files of the default-branch commit it was built on.
 
 `endpoint` is the App base URL over `https`, without a trailing slash. Plain
 `http` is accepted only for `127.0.0.1` and `localhost`.
 
-The action runs on `pull_request`, `push` and `workflow_dispatch` only. It
-refuses `workflow_run`, `pull_request_target`, `merge_group` and every other
-event before the checkout. `workflow_run` and `pull_request_target` run with the
-base repository's privileges on a commit the pull request author controls, and
-the App accepts none of these events.
+The action runs on `pull_request`, `push`, `merge_group` and `workflow_dispatch`
+only. It refuses `workflow_run`, `pull_request_target` and every other event
+before the checkout. `workflow_run` and `pull_request_target` run with the base
+repository's privileges on a commit the pull request author controls, and the App
+accepts neither.
 
 ### Concurrency
 
@@ -109,7 +112,8 @@ cancel each other, even when their branches share a name. Only pull request runs
 are cancelled. A cancelled run uploads nothing, and the App answers the newer
 head. A `push` to a branch and a dispatched baseline or reanchor on that branch
 share a group, and cancelling one of them would drop its upload, so they are
-never cancelled. A run waiting in the queue can still be replaced by a newer run
+never cancelled. Each merge group has its own ref, so it has its own group, and
+it is never cancelled either. A run waiting in the queue can still be replaced by a newer run
 in the same group. Dispatch a baseline or reanchor again when its run is
 replaced.
 
@@ -117,13 +121,13 @@ replaced.
 
 | Mode | Engine command | Payload | Sent to |
 | --- | --- | --- | --- |
-| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src`, plus `--base <base>` on a pull request | state report | `<endpoint>/v1/reports` |
+| `report` (default) | `check --json -c /bundle/.archfit.yaml --root /src`, plus `--base <base>` on a pull request or merge group | state report | `<endpoint>/v1/reports` |
 | `discovery` | `config init --root /src --output -` | draft policy | `<endpoint>/v1/discoveries` |
 | `baseline` | `baseline -c /bundle/.archfit.yaml --root /src`, then `check` | `.archfit-baseline.json` | `<endpoint>/v1/baselines`; artifact only without `endpoint` |
 | `reanchor` | `baseline --reanchor --from /reference/.archfit-baseline.json -c /bundle/.archfit.yaml --root /src`, then `check` | the new `.archfit-baseline.json` | `<endpoint>/v1/reanchors`; artifact only without `endpoint` |
 
 Discovery, baseline and reanchor run on the default branch only. Reports come
-from `pull_request` and `push` runs; a `workflow_dispatch` run in `report` mode
+from `pull_request`, `push` and `merge_group` runs; a `workflow_dispatch` run in `report` mode
 is refused before any work, because the App accepts a dispatched run only as
 discovery, baseline or reanchor. Baseline and reanchor mode fail unless the
 engine finds the captured baseline comparable in the same image. A baseline
@@ -194,6 +198,14 @@ mounts it read-only:
   head digest only when a policy owner approved that exact head commit.
 - On a pull request without `endpoint`, every file comes from the tip of the
   base branch.
+- On a merge group reported to the App, every file comes from the group commit.
+  The App accepts a file that differs from the default branch only when it can
+  attribute it to an owner-approved pull request in the queue (see
+  [Merge queue](#merge-queue)).
+- On a merge group without `endpoint`, every file comes from the event's base
+  commit, the default-branch commit the group was built on. A queued change to
+  them has no effect (the log says so), and a group that deletes `.archfit.yaml`
+  fails.
 - On `push` and `workflow_dispatch`, the files come from the commit the run
   executed on.
 - A missing file gives an empty digest. Without `.archfit.yaml` there is nothing
@@ -202,9 +214,51 @@ mounts it read-only:
   merges) is refused. Merge the base branch into it so that one merge base
   remains.
 
+## Merge queue
+
+Add the `merge_group` trigger (as in [Usage](#usage)) when the default branch has a
+merge queue and the App's check is required. GitHub then requires the check on each
+merge group: a temporary commit holding the default branch, every pull request ahead
+in the queue, and this one. A success on a pull request head does not count for the
+group, because two pull requests that pass alone can fail together.
+
+The action:
+
+- runs only for `merge_group` events with action `checks_requested` whose
+  `merge_group.base_ref` is the default branch, and only in `report` mode. Any other
+  queue, action or mode is refused before the checkout;
+- analyses exactly the event's `merge_group.head_sha`. The run's `GITHUB_SHA` and
+  `GITHUB_REF` must equal the event's `head_sha` and `head_ref`. The
+  `gh-readonly-queue/...` branch name is never parsed;
+- requires the event's `merge_group.base_sha` to be an ancestor of the group commit
+  and of the fetched default branch;
+- reads the trusted inputs as described in [Trusted inputs](#trusted-inputs), and runs
+  origin against the event's base commit;
+- sends the report to `<endpoint>/v1/reports`. The envelope names no pull request,
+  base or merge base: the App reads the queue and its members from GitHub, never
+  from the upload. The App writes the checks on the group commit.
+
+No policy classification runs for a merge group. A queued policy change is
+classified on its own pull request.
+
+The App answers `409 stale_group` when the queue no longer has a group with this
+commit (it was destroyed, rebuilt or merged). That is final and is a notice, not a
+failure: the App writes nothing for that commit. The queue needs the App's
+**Merge queues** permission. Without it, the App answers `503`, the action retries,
+and the group fails by GitHub's timeout. It never passes.
+
+Only the default branch's queue is supported. Fork pull requests stay
+unsupported, in a group as on their own.
+
+A group whose commit has no `.archfit.yaml` measures nothing and sends nothing, as
+on a pull request. The App's check on the group then stays pending until GitHub's
+timeout fails the group. To retire archfit, first remove its required check from the
+branch rule, then merge the pull request that deletes the policy.
+
 ## Origin on pull requests
 
-On a `pull_request` run, the report check runs with `--base <base>`. The engine
+On a `pull_request` run, the report check runs with `--base <base>`. A merge
+group run compares with the event's base commit the same way. The engine
 checks that commit out in a temporary worktree and scores it with the same
 trusted inputs. Then it marks each finding of the analysed commit. The base is the
 event's base commit when the merge commit is analysed (it already holds the
@@ -270,8 +324,8 @@ The envelope is owned by the archfit App: `archfit.report-envelope.v1`, 18 flat
 typed keys, plus the optional `policy_change` object on a pull request report (see
 [Policy change](#policy-change)). [`schema/`](schema/) holds the vendored copy, and
 [`schema/SCHEMA_SOURCE`](schema/SCHEMA_SOURCE) names its App revision and
-sha256. CI validates the envelopes the action builds for `pull_request` and
-`push` reports and for the discovery, baseline and reanchor envelopes against it.
+sha256. CI validates the envelopes the action builds for `pull_request`, `push`
+and `merge_group` reports and for the discovery, baseline and reanchor envelopes against it.
 Checking that the vendored bytes still equal the App's schema belongs in the App's
 CI.
 
@@ -290,7 +344,8 @@ commit is the run's `GITHUB_SHA` on `refs/pull/<number>/merge`, and the action
 accepts it only when its parents are exactly the event's base and head: the
 event's own `merge_commit_sha` is filled in by GitHub after the event is sent
 and is often null. Off pull requests `analyzed_sha` equals `head_sha` and
-`integration` is empty.
+`integration` is empty. On a merge group both are the group commit, and
+`pull_request` is 0 with empty `base_sha` and `merge_base_sha`.
 
 It is **not** a security claim. Every field is self-reported by a job that runs
 pull-request code. The App binds the envelope to the OIDC token's claims and to
@@ -308,8 +363,8 @@ One `POST` per attempt: `Authorization: Bearer <OIDC token>`, the envelope in
   is `Retry-After` in seconds (at most four digits, capped at 120 s). Any other
   value, an HTTP date included, falls back to 5 s doubling with ±20% jitter.
   Each attempt mints a fresh OIDC token.
-- 409 on a report or a draft policy means a newer commit or run attempt
-  supersedes the upload: a notice, not a failure. 409 on a baseline or a
+- 409 on a report or a draft policy means a newer commit, run attempt or merge
+  group supersedes the upload: a notice, not a failure. 409 on a baseline or a
   re-anchor fails the job (see below). Every other answer is final; the error names the App's code
   and the fix.
 - The App's answer reaches the log and the step summary only when each field has
@@ -364,8 +419,8 @@ The engine runs as `docker run ghcr.io/alexei-led/archfit@<digest>` with:
 - the workspace owner's uid and gid, all capabilities dropped, and fixed
   `HOME=/tmp` plus container-only Git trust for `/src`. No token, OIDC variable,
   credential, or copied host environment. No host/global Git config changes;
-- the checkout at `/src`, with its `.git` read-only. On a pull request only, an
-  empty directory from `RUNNER_TEMP` is mounted writable over
+- the checkout at `/src`, with its `.git` read-only. On a pull request or merge
+  group only, an empty directory from `RUNNER_TEMP` is mounted writable over
   `/src/.git/worktrees` (see below);
 - each trusted input mounted read-only at `/bundle/<name>`, over an empty
   writable `/bundle` directory. The engine keeps its fact cache

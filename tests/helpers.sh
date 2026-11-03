@@ -135,6 +135,14 @@ on_pull_request() { # HEAD BASE [HEAD_REPO [MERGE]]
 		| .pull_request.head.repo.full_name = $r | .pull_request.mergeable = ($m != "")' \
 		--arg h "$1" --arg b "$2" --arg r "${3:-acme/shop}" --arg m "${4:-}"
 }
+on_merge_group() { # HEAD BASE [ACTION [BASE_REF]]
+	# GITHUB_SHA and GITHUB_REF are the group's, as GitHub sets them for a merge_group run.
+	local ref=refs/heads/gh-readonly-queue/main/pr-42-$1
+	export GITHUB_EVENT_NAME=merge_group GITHUB_REF=$ref GITHUB_SHA=$1
+	event_file merge_group '.action = $a | .merge_group.head_sha = $h | .merge_group.head_ref = $r
+		| .merge_group.base_sha = $b | .merge_group.base_ref = $br | .merge_group.head_commit.id = $h' \
+		--arg h "$1" --arg b "$2" --arg r "$ref" --arg a "${3:-checks_requested}" --arg br "${4:-refs/heads/main}"
+}
 on_push() { # SHA
 	export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_SHA=$1
 	event_file push '.after = $s' --arg s "$1"

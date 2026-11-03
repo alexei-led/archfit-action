@@ -11,8 +11,11 @@
 # pull request changes it (merge base..head, the diff behind GitHub's file list) and
 # from the tip of the base branch otherwise. The App trusts a head digest only when a
 # policy owner approved that exact head commit. Without an endpoint nobody checks that
-# approval, so every file comes from the base tip. Push and dispatch runs read the
-# files from the protected ref the run executed on.
+# approval, so every file comes from the base tip. A merge group reported to the App
+# reads every file at the group commit: the App accepts a blob that differs from the
+# default branch only when it can attribute it to an owner-approved queued pull
+# request. Without an endpoint a group's files come from the event's base commit.
+# Push and dispatch runs read the files from the protected ref the run executed on.
 #
 # Container. Git trusts only /src through fixed command-environment config: bind
 # mount ownership can differ from the runner UID. No host/global Git config is changed.
@@ -31,18 +34,21 @@
 # of the run (GITHUB_SHA on refs/pull/N/merge), or the head when the event reports
 # conflicts. The head stays the commit approval binds to. The merge commit must have
 # exactly the event's base and head as parents, else the run fails: the job context
-# only says where to look, the event says what it must be.
+# only says where to look, the event says what it must be. A merge group is analysed
+# at the event's merge_group.head_sha, which prepare.sh checked against the job's
+# GITHUB_SHA and GITHUB_REF; its base must be an ancestor of it and of the default branch.
 #
-# Origin. On a pull request the check also runs with --base: the engine checks that
-# commit out in a temporary worktree and marks every finding introduced,
-# pre_existing or unknown (comparison.origin_status, introduced_finding_ids). The
-# commit is the event's base for a merge commit, which already holds the target's own
-# changes, and the merge base when the head is analysed. That is
-# report-only: the verdict and exit code are the head's alone. `git worktree add`
-# writes .git/worktrees/<name>, so for that run one empty RUNNER_TEMP directory is
-# mounted writable over /src/.git/worktrees; the rest of .git stays read-only, and
-# host git never reads that directory. The worktree itself goes under
-# /src/.archfit-cache/worktrees, which the action deletes after the container exits.
+# Origin. On a pull request or a merge group the check also runs with --base: the
+# engine checks that commit out in a temporary worktree and marks every finding
+# introduced, pre_existing or unknown (comparison.origin_status,
+# introduced_finding_ids). The commit is the event's base for a merge commit, which
+# already holds the target's own changes, the merge base when the head is analysed, and
+# the event's base for a merge group. That is report-only: the verdict and exit code
+# are the analysed commit's alone. `git worktree add` writes .git/worktrees/<name>, so
+# for that run one empty RUNNER_TEMP directory is mounted writable over
+# /src/.git/worktrees; the rest of .git stays read-only, and host git never reads that
+# directory. The worktree itself goes under /src/.archfit-cache/worktrees, which the
+# action deletes after the container exits.
 # A --base run that does not end in a verdict is run again without --base: the
 # report then has no origin, and the log says so.
 set -euo pipefail
@@ -77,11 +83,11 @@ image=$ENGINE_IMAGE_REPO@$image_digest
 mkdir -p "$inputs" "$reference" "$bundle" "$out"
 : >"$work/inputs.tsv"
 
-head="" analysed="" integration="" base_sha="" merge_base="" origin_base="" pull_request=0 fork=false input_tip=""
+head="" analysed="" integration="" base_sha="" merge_base="" group_base="" origin_base="" pull_request=0 fork=false input_tip=""
 engine_version="" platform="" verdict="" payload="" kind="" artifact="" report_file="" origin=""
 
 resolve_revisions() {
-	local base_ref head_repo checked_out commits
+	local base_ref head_repo checked_out commits protected
 	case $event in
 	pull_request)
 		head=$(event_field .pull_request.head.sha)
@@ -113,6 +119,33 @@ resolve_revisions() {
 		else
 			origin_base=$merge_base
 		fi
+		;;
+	merge_group)
+		# The group commit is analysed as it is: the queue built it from the default branch
+		# and the pull requests ahead. The App resolves the members from GitHub and states
+		# no base in the envelope; group_base is the event's base, a default-branch commit,
+		# checked here because origin and the inputs without an endpoint come from it.
+		head=$(event_field .merge_group.head_sha)
+		analysed=$head
+		group_base=$(event_field .merge_group.base_sha)
+		base_ref=$(event_field .merge_group.base_ref)
+		base_ref=${base_ref#refs/heads/}
+		is_sha "$head" || die "the merge_group event carries no head SHA"
+		is_sha "$group_base" || die "the merge_group event carries no base SHA"
+		git -C "$src" cat-file -e "$group_base^{commit}" 2>/dev/null ||
+			die "base commit $group_base is not in the fetched history"
+		git -C "$src" merge-base --is-ancestor "$group_base" "$head" ||
+			die "the merge group $head is not built on the event's base $group_base"
+		protected=$(git -C "$src" rev-parse --verify --quiet "refs/remotes/origin/$base_ref^{commit}") ||
+			die "the base branch $base_ref was not fetched"
+		git -C "$src" merge-base --is-ancestor "$group_base" "$protected" ||
+			die "the merge group's base $group_base is not in the history of $base_ref"
+		# With an endpoint every input is the group commit's blob: the App accepts one that
+		# differs from the default branch only when an owner approved the queued pull
+		# request it comes from. Without one nobody checks that, so the base's.
+		input_tip=$group_base
+		[[ -z $endpoint ]] || input_tip=$head
+		origin_base=$group_base
 		;;
 	*)
 		head=${GITHUB_SHA:?}
@@ -161,7 +194,8 @@ assert_no_credentials() {
 }
 
 # materialize PATH [DIR] writes the trusted copy of PATH into DIR (the inputs directory
-# by default) and records where it came from (base or head on a pull request, else ref).
+# by default) and records where it came from: base or head on a pull request, group or
+# base on a merge group, else ref.
 # A PATH absent at the chosen commit leaves no file and an empty digest.
 materialize() {
 	local path=$1 dir=${2:-$inputs} rev=$input_tip from=ref rc=0 entry fmode ftype oid digest=""
@@ -173,6 +207,17 @@ materialize() {
 			case $rc in
 			0) ;;
 			1) rev=$head from=head ;;
+			*) die "git diff failed for $path" ;;
+			esac
+		fi
+	elif [[ $event == merge_group ]]; then
+		from=group
+		if [[ -z $endpoint ]]; then
+			from=base
+			git -C "$src" diff --quiet --no-ext-diff "$group_base" "$head" -- "$path" || rc=$?
+			case $rc in
+			0) ;;
+			1) notice "this merge group changes $path; without an App endpoint the base's copy is measured: no owner approves the change" ;;
 			*) die "git diff failed for $path" ;;
 			esac
 		fi
@@ -502,6 +547,8 @@ write_summary() {
 		else
 			what="$what, analysed alone: the pull request conflicts with its base"
 		fi
+	elif [[ $event == merge_group ]]; then
+		what="merge group commit \`$head\` on base \`$group_base\`"
 	fi
 	summary "### archfit $mode" "" \
 		"- Analysed: $what" \
@@ -528,9 +575,9 @@ report)
 	for path in "${TRUSTED_INPUTS[@]}"; do materialize "$path"; done
 	# Without an App the base policy gates the pull request; a head that deletes it would
 	# otherwise pass as "measured" against a policy it no longer carries.
-	if [[ $event == pull_request && -z $endpoint && -f $inputs/.archfit.yaml ]] &&
+	if [[ ($event == pull_request || $event == merge_group) && -z $endpoint && -f $inputs/.archfit.yaml ]] &&
 		[[ -z $(git -C "$src" ls-tree "$head" -- .archfit.yaml) ]]; then
-		die "this pull request deletes .archfit.yaml. Without an App endpoint no policy owner approves that, so the job fails; keep the policy, or report to the App so an owner can approve the deletion."
+		die "this ${event//_/ } deletes .archfit.yaml. Without an App endpoint no policy owner approves that, so the job fails; keep the policy, or report to the App so an owner can approve the deletion."
 	fi
 	if [[ ! -f $inputs/.archfit.yaml ]]; then
 		notice "no .archfit.yaml at $(source_of .archfit.yaml); there is no policy to measure against. Dispatch this workflow with mode: discovery on the default branch to propose one."
@@ -540,7 +587,7 @@ report)
 	engine_identity
 	payload=$out/archfit-state.json
 	prepare_policy_change
-	# origin_base is empty off pull requests, so push runs measure the commit alone.
+	# origin_base is empty off pull requests and merge groups, so push runs measure the commit alone.
 	check "$payload" "$origin_base"
 	classify_policy_change
 	kind=report artifact=archfit-report

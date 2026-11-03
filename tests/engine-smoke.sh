@@ -140,4 +140,53 @@ expect "the envelope conforms to the App schema" "$validator" "$schema" "$(out e
 expect "the base worktree is gone from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
 expect "the host .git/worktrees stays empty" test -z "$(ls -A "$GITHUB_WORKSPACE/.git/worktrees")"
 
+# A merge queue of two pull requests that each pass alone: main declares modules a and b
+# with no dependency between them and forbids module cycles; one pull request makes a
+# call b, the other b call a. The group holds both, so the cycle exists only there.
+queue=$tmp/queue
+git init --quiet -b main "$queue"
+write_module "$queue"
+cp "$queue/pkg/a/a.go" "$tmp/a-calls-b.go"
+printf 'package a\n\n// UseB is not wired to b yet.\nfunc UseB() string { return "" }\n' >"$queue/pkg/a/a.go"
+# The module fixture's policy with one rule: no cycle between the declared modules.
+awk '/^rules:/ { print "rules:\n  - id: no_module_cycles\n    type: module_cycle\n    gate: fail"; skip = 1; next }
+	/^languages:/ { skip = 0 } !skip' "$queue/.archfit.yaml" >"$tmp/policy" && mv "$tmp/policy" "$queue/.archfit.yaml"
+commit_all "$queue" "two modules, no dependency, no cycles allowed"
+q_base=$(git -C "$queue" rev-parse HEAD)
+git -C "$queue" checkout --quiet -b a-calls-b
+cp "$tmp/a-calls-b.go" "$queue/pkg/a/a.go"
+commit_all "$queue" "a calls b"
+q_ab=$(git -C "$queue" rev-parse HEAD)
+git -C "$queue" checkout --quiet -b b-calls-a "$q_base"
+printf 'package b\n\nimport "example.com/single/pkg/a"\n\n// Hello is the public API of module b.\nfunc Hello() string { return "hello" }\n\n// Echo calls a.\nfunc Echo() string { return a.UseB() }\n' >"$queue/pkg/b/b.go"
+commit_all "$queue" "b calls a"
+q_ba=$(git -C "$queue" rev-parse HEAD)
+git -C "$queue" checkout --quiet -b queue-group "$q_base"
+git -C "$queue" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "group: a-calls-b" "$q_ab"
+git -C "$queue" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "group: b-calls-a" "$q_ba"
+q_group=$(git -C "$queue" rev-parse HEAD)
+git -C "$queue" checkout --quiet main
+
+for pr_head in "$q_ab" "$q_ba"; do
+	new_case "merge queue: pull request $pr_head passes alone"
+	on_pull_request "$pr_head" "$q_base"
+	run_action "$queue"
+	expect_eq "the analysis-only job passes" 0 "$action_rc"
+	expect "no module cycle alone" jq -e '[.findings[] | select(.rule_id == "no_module_cycles")] | length == 0' "$(out payload-file)"
+done
+
+new_case "merge queue: the group of both is blocked by the cycle they make together"
+on_merge_group "$q_group" "$q_base"
+run_action "$queue"
+payload=$(out payload-file)
+expect_eq "the blocked verdict fails an analysis-only job" 1 "$action_rc"
+expect_eq "verdict" blocked "$(out verdict)"
+expect_eq "the group commit was analysed" "$q_group" "$(fact analyzed_sha)"
+expect "the module cycle is found" jq -e '[.findings[] | select(.rule_id == "no_module_cycles")] | length > 0' "$payload"
+# An import cycle degrades the Go loader on the group only, so origin is unknown; the
+# comparison still ran against the event's base.
+expect_eq "origin compared with the event's base" "$q_base" "$(jq -r .comparison.base_ref "$payload")"
+expect "the envelope conforms to the App schema" "$validator" "$schema" "$(out envelope-file)=$payload"
+expect "the base worktree is gone from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
+
 finish

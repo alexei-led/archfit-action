@@ -1,0 +1,18 @@
+{
+  "action": "checks_requested",
+  "merge_group": {
+    "head_sha": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "head_ref": "refs/heads/gh-readonly-queue/main/pr-42-1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "base_sha": "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+    "base_ref": "refs/heads/main",
+    "head_commit": {
+      "id": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "tree_id": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+      "message": "Merge pull request #42 from acme/feature",
+      "timestamp": "2026-11-03T09:00:00Z",
+      "author": { "name": "test", "email": "test@example.com" },
+      "committer": { "name": "GitHub", "email": "noreply@github.com" }
+    }
+  },
+  "repository": { "full_name": "acme/shop", "default_branch": "main" }
+}
