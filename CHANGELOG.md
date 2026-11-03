@@ -1,5 +1,47 @@
 # Changelog
 
+## v3.1.1
+
+### Added
+
+- Merge queue support for the default branch. The action runs on `merge_group`
+  events with action `checks_requested` whose `merge_group.base_ref` is the default
+  branch, in `report` mode. It analyses exactly the event's `merge_group.head_sha`,
+  the group commit GitHub requires the check on. A pull request head's success does
+  not count for the group.
+- The run's `GITHUB_SHA` and `GITHUB_REF` must equal the event's `head_sha` and
+  `head_ref`. The event's `base_sha` must be an ancestor of the group commit and of
+  the fetched default branch. Otherwise the job fails before the engine runs. The
+  `gh-readonly-queue/...` branch name is never parsed.
+- With an endpoint, a merge group's `.archfit.yaml`, `.archfit-baseline.json` and
+  `.archfit-labels.yaml` come from the group commit's blobs. The App accepts a file
+  that differs from the default branch only when it can attribute it to an
+  owner-approved queued pull request. Without an endpoint they come from the
+  event's base commit: a queued change to them has no effect (the log says so), and
+  a group that deletes the policy fails.
+- Origin runs against the event's base commit. No policy classification runs for a
+  merge group.
+- The envelope of a merge group report has `event: merge_group`, `pull_request` 0,
+  `head_sha` = `analyzed_sha` = the group commit, and empty `base_sha`,
+  `merge_base_sha` and `integration`. The App reads the queue and its members from
+  GitHub. `409 stale_group` (the group is gone) is a notice, not a failure.
+
+### Changed
+
+- `schema/SCHEMA_SOURCE` names App revision
+  `5360dbdccf2f463ee8e350d47fe419539291989e` and its merge-group contract. The schema
+  bytes are unchanged (sha256
+  `0c2de1a3691ac85935f04887b94bc98dbc01f57f65a9c4fc3db276d5bf78b7e6`).
+
+### Upgrade
+
+- Add `merge_group: { types: [checks_requested] }` to the workflow's triggers when
+  the default branch has a merge queue. The App must accept merge-group reports and
+  hold the **Merge queues: Read** permission and the **Merge group** event. Without
+  them a merge-group upload answers `503` and the group fails by GitHub's timeout. It
+  never passes. Pull request, push, discovery, baseline and reanchor runs are
+  unchanged.
+
 ## v3.1.0
 
 ### Changed

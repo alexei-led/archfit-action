@@ -71,6 +71,21 @@ git -C "$origin" checkout --quiet -b merge-f1 "$c2"
 git -C "$origin" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "merge f1 into c2" "$f1"
 m2=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet main
+# Merge groups for the queue of main, built on c2 as GitHub builds them: gc holds o1 (a
+# code-only pull request); g2 holds f1 then o1, so it changes the policy.
+git -C "$origin" checkout --quiet -b other "$c2"
+printf '// other\n' >>"$origin/pkg/b/b.go"
+commit_all "$origin" "other: code only"
+o1=$(git -C "$origin" rev-parse HEAD)
+group() { # BRANCH FROM PULL-REQUEST-HEAD: a group commit merging the head onto FROM
+	git -C "$origin" checkout --quiet -b "$1" "$2"
+	git -C "$origin" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "group $1" "$3"
+	git -C "$origin" rev-parse HEAD
+}
+gc=$(group queue-code "$c2" "$o1")
+g2=$(group queue-two "$m2" "$o1")
+gd=$(group queue-drop "$c2" "$d1")
+git -C "$origin" checkout --quiet main
 
 # Criss-cross: x2 and y2 each merge the other's first commit, so they have two merge bases.
 cross=$tmp/cross
@@ -142,6 +157,8 @@ requests() { # KIND: how many requests of KIND (upload|token) the App saw
 }
 upload_field() { jq -rs --argjson n "$1" "map(select(.kind == \"upload\"))[\$n] | $2" "$case_dir/app.log"; }
 token_query() { jq -rs 'map(select(.kind == "token"))[0].query' "$case_dir/app.log"; }
+check_calls() { jq -cs 'map(select(.command == "run" and .args[0] == "check"))' "$FAKE_DOCKER_LOG"; }
+compare_calls() { jq -s 'map(select(.command == "run" and .args[0] == "config")) | length' "$FAKE_DOCKER_LOG"; }
 engine_calls() { jq -s 'map(select(.command == "run")) | length' "$FAKE_DOCKER_LOG"; }
 engine_call() { jq -cs --arg a "$1" 'map(select(.command == "run" and .args[0] == $a))[0]' "$FAKE_DOCKER_LOG"; }
 json_ok() { jq -e "$1" "${@:3}" <<<"$2" >/dev/null; } # FILTER JSON [JQ ARGS]
@@ -411,7 +428,7 @@ expect_eq "no engine run" 0 "$(engine_calls)"
 
 # --- Events the App does not accept: refused before the checkout ----------------------
 
-for refused in workflow_run pull_request_target merge_group; do
+for refused in workflow_run pull_request_target; do
 	begin "$refused is refused before the checkout"
 	on_unsupported "$refused" "$f1" "$c2"
 	start_app "[$ok_answer]"
@@ -422,6 +439,135 @@ for refused in workflow_run pull_request_target merge_group; do
 	expect_eq "no engine run" 0 "$(engine_calls)"
 	expect_eq "no token requested" 0 "$(requests token)"
 done
+
+# --- Merge groups: the group commit the event names, inputs from its immutable base -----
+
+begin "code-only merge group: the group commit is analysed, every input from the event's base"
+on_merge_group "$gc" "$c2"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "the checkout is the group commit" "$gc" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+expect_eq "head_sha is the group commit" "$gc" "$(envelope_field head_sha)"
+expect_eq "analyzed_sha is the group commit, never a pull request head" "$gc" "$(envelope_field analyzed_sha)"
+expect_eq "no base, merge base, integration or pull request: the App resolves the members" \
+	'0||| ' "$(jq -r '"\(.pull_request)|\(.base_sha)|\(.merge_base_sha)|\(.integration) "' "$(out envelope-file)")"
+expect_eq "event" merge_group "$(envelope_field event)"
+expect "no policy classification" jq -e 'has("policy_change") | not' "$(out envelope-file)"
+expect_eq "every input read at the group commit" "group:$gc group:$gc group:$gc" \
+	"$(jq -r '[.inputs[] | "\(.from):\(.commit)"] | join(" ")' "$(out facts-file)")"
+expect_eq "baseline_digest is the group commit's blob" \
+	"$(blob_sha256 "$origin" "$gc:.archfit-baseline.json")" "$(envelope_field baseline_digest)"
+expect_eq "labels_digest is the group commit's blob" \
+	"$(blob_sha256 "$origin" "$gc:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
+expect_eq "origin compares with the base" "$c2" "$(check_calls | jq -r '.[0].args | .[index("--base") + 1]')"
+expect "the envelope is valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "one upload" 1 "$(requests upload)"
+expect "the summary names the group commit" summary_has "merge group commit \`$gc\` on base \`$c2\`"
+
+begin "merge group of two pull requests, one changing the policy: every input is the group commit's blob"
+on_merge_group "$g2" "$c2"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "analyzed_sha is the group commit" "$g2" "$(envelope_field analyzed_sha)"
+expect_eq "the policy the group changes comes from the group commit" \
+	"$(blob_sha256 "$origin" "$g2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect_eq "every input read at the group commit" "$g2 $g2 $g2" "$(jq -r '[.inputs[].commit] | join(" ")' "$(out facts-file)")"
+expect "no policy classification for a group" jq -e 'has("policy_change") | not' "$(out envelope-file)"
+expect_eq "nothing classified" 0 "$(compare_calls)"
+expect "the envelope is valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+
+begin "analyze-only merge group that changes the policy: the base policy gates it"
+on_merge_group "$g2" "$c2"
+run_action "$origin"
+expect_eq "the blocked verdict fails the job" 1 "$action_rc"
+expect_eq "the policy comes from the base, not the group" \
+	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
+expect_eq "every input read at the event's base" "base:$c2 base:$c2 base:$c2" \
+	"$(jq -r '[.inputs[] | "\(.from):\(.commit)"] | join(" ")' "$(out facts-file)")"
+expect "the log says the queued policy change is not measured" log_has "this merge group changes .archfit.yaml; without an App endpoint the base's copy is measured"
+
+begin "analyze-only merge group that deletes the policy: failure"
+on_merge_group "$gd" "$c2"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says the merge group deletes the policy" log_has "this merge group deletes .archfit.yaml"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
+begin "merge group the App no longer queues (409 stale_group): final, no retry"
+on_merge_group "$gc" "$c2"
+start_app '[{"status":409,"body":{"error":"stale_group"}}]'
+run_action "$origin"
+expect_eq "the action succeeds: the App owns the group's check" 0 "$action_rc"
+expect_eq "one upload, no retry" 1 "$(requests upload)"
+expect "the notice names the code" log_has "the App answered 409 stale_group"
+
+begin "merge group upload the App cannot decide yet (503): retried"
+on_merge_group "$gc" "$c2"
+start_app "[{\"status\":503,\"body\":{\"error\":\"unavailable\"}},$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "two uploads" 2 "$(requests upload)"
+
+for mismatch in sha ref; do
+	begin "merge group whose job context is not the event's group ($mismatch): refused before the checkout"
+	on_merge_group "$gc" "$c2"
+	case $mismatch in
+	sha) export GITHUB_SHA=$g2 ;;
+	ref) export GITHUB_REF=refs/heads/gh-readonly-queue/main/pr-7-$g2 ;;
+	esac
+	start_app "[$ok_answer]"
+	run_action "$origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect "the error names the event's group" log_has "but the merge_group event names"
+	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+	expect_eq "no token requested" 0 "$(requests token)"
+done
+
+begin "merge group action other than checks_requested: refused"
+on_merge_group "$gc" "$c2" destroyed
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the action" log_has "merge_group action 'destroyed' is not checks_requested"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+
+begin "merge group for another branch's queue: refused"
+on_merge_group "$gc" "$c2" checks_requested refs/heads/release
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the default branch" log_has "merge queue of the default branch (main) only"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+
+begin "merge group run in baseline mode: refused"
+on_merge_group "$gc" "$c2"
+export ARCHFIT_MODE=baseline
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says merge groups only report" log_has "a merge_group run only reports"
+
+begin "merge group not built on the event's base: refused before the engine"
+on_merge_group "$gc" "$f1"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the base" log_has "is not built on the event's base $f1"
+expect_eq "no engine run" 0 "$(engine_calls)"
+expect_eq "no token requested" 0 "$(requests token)"
+
+begin "merge group whose base is not in the protected branch's history: refused"
+on_merge_group "$m2" "$f1"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the branch" log_has "base $f1 is not in the history of main"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
+begin "merge group whose base is not fetched: refused"
+on_merge_group "$gc" 0123456789abcdef0123456789abcdef01234567
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the commit" log_has "base commit 0123456789abcdef0123456789abcdef01234567 is not in the fetched history"
 
 # --- Analyze-only pull requests: no owner approval, so every input from the base tip --
 
@@ -458,8 +604,6 @@ expect "the error explains the merge bases" log_has "more than one merge base"
 expect_eq "no engine run" 0 "$(engine_calls)"
 
 # --- Origin against the merge base: report-only, never a reason to fail -------------
-
-check_calls() { jq -cs 'map(select(.command == "run" and .args[0] == "check"))' "$FAKE_DOCKER_LOG"; }
 
 for base_rc in 3 137; do
 	begin "pull request whose base comparison exits $base_rc: reported again without origin"
@@ -573,6 +717,15 @@ mutate unknown-integration '.integration = "rebased"'
 mutate pull-request-without-integration '.integration = ""'
 mutate baseline-with-integration '.integration = "merged"' "$tmp/baseline.envelope"
 mutate baseline-without-analyzed-sha '.analyzed_sha = ""' "$tmp/baseline.envelope"
+# A merge group states no base, merge base, integration, pull request or classification:
+# the App reads the group's members and inputs from GitHub.
+jq -cj '.event = "merge_group" | .pull_request = 0 | .base_sha = "" | .merge_base_sha = "" | .integration = "" | .analyzed_sha = .head_sha | del(.policy_change)' "$reference" >"$tmp/merge-group.envelope"
+expect "a merge group's envelope is valid" valid_envelope "$tmp/merge-group.envelope" ""
+mutate merge-group-with-base-sha ".base_sha = \"$c2\"" "$tmp/merge-group.envelope"
+mutate merge-group-with-merge-base ".merge_base_sha = \"$c2\"" "$tmp/merge-group.envelope"
+mutate merge-group-with-integration '.integration = "merged"' "$tmp/merge-group.envelope"
+mutate merge-group-with-pull-request '.pull_request = 42' "$tmp/merge-group.envelope"
+mutate merge-group-with-policy-change '. + {policy_change: {direction: "loosening", rules_removed: [], rules_loosened: [], waivers_added: [], allowlists_widened: [], coverage_lost: [], declarations_changed: [], rules_added: [], rules_tightened: [], waivers_removed: [], allowlists_narrowed: [], coverage_gained: []}}' "$tmp/merge-group.envelope"
 jq -cj '.integration = "conflicts" | .analyzed_sha = .head_sha' "$reference" >"$case_dir/conflicts.envelope"
 expect "a conflicting pull request's envelope is valid" valid_envelope "$case_dir/conflicts.envelope" ""
 edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
@@ -668,7 +821,7 @@ on_push "$c2"
 start_app '[{"status": 400, "body": {"error": "unsupported_event"}}]'
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the hint names the report events" log_has "Reports come from pull_request and push runs"
+expect "the hint names the report events" log_has "Reports come from pull_request, push and default-branch merge_group runs"
 expect "the hint does not send a report to workflow_dispatch" bash -c '! grep -q "by workflow_dispatch" "$1"' _ "$case_dir/log"
 
 begin "404: final, endpoint hint"
@@ -1298,7 +1451,6 @@ m_code=$(merge_commit "$policy_origin" "$pc_base" "$pc_code" merge-code)
 # policy_mount TARGET prints the host file the engine call mounted at TARGET.
 policy_mount() { jq -r --arg t "$1" '.options | [range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]]
 	| map(select(endswith(":" + $t + ":ro"))) | .[0] // "" | sub(":" + $t + ":ro$"; "")' <<<"$(engine_call config)"; }
-compare_calls() { jq -s 'map(select(.command == "run" and .args[0] == "config")) | length' "$FAKE_DOCKER_LOG"; }
 
 policy_change_of() { jq -c '.policy_change' "$1"; }
 

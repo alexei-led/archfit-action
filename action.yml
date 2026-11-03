@@ -13,8 +13,8 @@ inputs:
       https://archfit.example. Reports go to <endpoint>/v1/reports, discovery
       drafts to <endpoint>/v1/discoveries, captured baselines to
       <endpoint>/v1/baselines and re-anchored baselines to <endpoint>/v1/reanchors.
-      Empty means analyze only: nothing is sent, pull requests are measured against
-      the base branch's policy, baseline and labels, a blocked verdict or missing required evidence fails the
+      Empty means analyze only: nothing is sent, pull requests and merge groups are
+      measured against the base's policy, baseline and labels, a blocked verdict or missing required evidence fails the
       job, and a captured or re-anchored baseline is an artifact only.
     required: false
     default: ""

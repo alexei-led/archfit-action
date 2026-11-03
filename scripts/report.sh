@@ -6,6 +6,8 @@
 # repository, event, pull request, head, base and merge base, the commit analysed and how
 # the pull request integrates (merged or conflicts), run, engine identity, and the
 # digests of the payload and of the baseline and labels files the engine read.
+# A merge group states its group commit as head and analysed commit, and no base: the App
+# reads the queue and the members from GitHub, never from the envelope.
 # Every field is self-reported by a job that runs pull-request code. The App binds the
 # envelope to the OIDC token's claims and to GitHub's own data and trusts no field
 # alone: a matching envelope is necessary for an accepted report, never sufficient.
@@ -226,12 +228,13 @@ hint() {
 	repository_mismatch) echo "The OIDC token and the envelope name different repositories." ;;
 	not_installed) echo "Install the archfit GitHub App on this repository." ;;
 	run_not_found | run_mismatch | digest_mismatch) echo "Run the workflow again." ;;
+	merge_group_unverified) echo "The App could not confirm this merge group from GitHub; queue the pull request again." ;;
 	payload_too_large | discovery_too_large | baseline_too_large) echo "The payload exceeds the App's size limit." ;;
 	settings_missing) echo "Merge the onboarding pull request that adds .archfit-app.yaml first." ;;
 	workflow_not_approved) echo "Run $kind from the workflow that .archfit-app.yaml names." ;;
 	not_default_branch | unsupported_event | envelope_mismatch | fork)
 		if [[ $kind == report ]]; then
-			echo "Reports come from pull_request and push runs of this repository."
+			echo "Reports come from pull_request, push and default-branch merge_group runs of this repository."
 		else
 			echo "Run $kind by workflow_dispatch on the default branch of this repository."
 		fi
@@ -297,7 +300,7 @@ case $status in
 		summary "- App: refused the $kind (409${code:+ $code}): no pull request was opened. Dispatch $again again."
 		die "the App answered 409 ${code:-conflict}: the default branch moved on or a newer run attempt exists, so no baseline pull request was opened. Dispatch $again again on the current default-branch head."
 	fi
-	notice "the App answered 409 ${code:-conflict}: a newer commit or run attempt supersedes this upload, and nothing was published for it"
+	notice "the App answered 409 ${code:-conflict}: a newer commit, run attempt or merge group supersedes this upload, and nothing was published for it"
 	;;
 000)
 	summary "- App: no answer for the $kind upload after $attempt attempt(s)."
