@@ -14,7 +14,8 @@ between them.
 | `archfit-action` (this one) | the execution and upload adapter (Apache-2.0) |
 | `archfit-app` | tenancy, approved policy, baselines, PR feedback, **the envelope contract** (private) |
 
-The design plan lives in `archfit-app` under `docs/plans/`.
+Start here: new work follows the [Archfit 4 design](https://github.com/alexei-led/archfit/blob/main/docs/plans/20261110-archfit-4-architecture-change-control.md)
+in `archfit`, the current design for the engine, this Action and the App.
 
 ## Layout
 
