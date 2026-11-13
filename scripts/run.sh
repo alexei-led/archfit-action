@@ -13,6 +13,7 @@
 # head is the tip itself (a push at the tip, whose tree holds the tip's policy), the engine
 # reads the checkout's file and compares it with the tip's: a difference is unknown, with
 # the record that restores the file. At the tip the result also carries the repository state.
+# A deleted policy cannot enter the CLI: the Action emits unknown without an engine run.
 #
 # Checked commit. A pull request is checked at its head, the commit the App binds the
 # result to (the workflow run's head_sha); the change is what the head adds to its merge
@@ -24,8 +25,9 @@
 # ownership can differ from the runner UID. No host/global Git config is changed. The
 # checkout is mounted at /src with .git read-only, and the policy copy read-only outside
 # /src. Only fixed HOME/Git settings are passed: no token, OIDC variable, credential, or
-# copied host environment. The working tree stays writable: the engine keeps its cache in
-# .archfit-cache, and target build tools can write there. .git is read-only so code that
+# copied host environment. The working tree stays writable for target build tools. A fresh
+# RUNNER_TEMP directory hides the checkout's .archfit-cache: submitted facts are never read,
+# and the engine writes its cache outside the checkout. .git is read-only so code that
 # runs during analysis cannot plant git config or hooks for git on the runner to execute
 # later. The result is read from the engine's stdout into RUNNER_TEMP, outside every mount.
 set -euo pipefail
@@ -48,6 +50,7 @@ engine_log=$out/engine.log
 policy_copy=$work/policy/$POLICY # the target tip's policy blob, mounted read-only with --policy
 image=$ENGINE_IMAGE_REPO@$image_digest
 mkdir -p "$out" "$(dirname "$policy_copy")"
+cache_dir=$(mktemp -d "$work/cache.XXXXXX")
 
 head="" target_branch="" target_sha="" merge_base="" group_base="" pull_request=0 fork=false
 policy_source="" policy_digest="" engine_version="" platform="" status="" payload=""
@@ -136,9 +139,10 @@ select_policy() {
 	*) die "git diff failed for $POLICY" ;;
 	esac
 	[[ $head != "$target_sha" ]] || policy_source=checkout
-	if [[ $policy_source == checkout ]]; then
-		[[ -n $(git -C "$src" ls-tree "$head" -- "$POLICY") || -n $(git -C "$src" ls-tree "$target_sha" -- "$POLICY") ]]
-		return
+	if [[ -z $(git -C "$src" ls-tree "$head" -- "$POLICY") ]]; then
+		policy_source=missing
+	elif [[ $policy_source == checkout ]]; then
+		return 0
 	fi
 	entry=$(git -C "$src" ls-tree "$target_sha" -- "$POLICY") || die "git ls-tree failed for $POLICY at $target_sha"
 	[[ -n $entry ]] || return 1
@@ -160,6 +164,7 @@ engine() {
 		--env GIT_CONFIG_VALUE_0=/src \
 		--volume "$src:/src" \
 		--volume "$src/.git:/src/.git:ro" \
+		--volume "$cache_dir:/src/.archfit-cache:rw" \
 		${mounts[@]+"${mounts[@]}"} \
 		--workdir /src \
 		"$image" "$@"
@@ -198,11 +203,34 @@ engine_identity() {
 	esac
 	[[ $platform == "$runner_platform" ]] ||
 		die "image $image_digest is built for $platform, but this runner is $runner_platform; pin the digest the App's manifest lists for $runner_platform"
+	# No container runs for a missing policy; the envelope reports the configured pin.
+	if [[ $policy_source == missing ]]; then
+		engine_version=$pinned_version
+		return
+	fi
 	line=$(engine --version) || die "$image did not report its version"
 	read -r word1 word2 engine_version _ <<<"$line"
 	[[ $word1 == archfit && $word2 == version ]] || die "unexpected engine version output: $line"
 	[[ $engine_version == "$pinned_version" ]] ||
 		die "image $image_digest is engine $engine_version, not $pinned_version; pin the digest of the engine version you name"
+}
+
+# The CLI treats a missing policy as a usage error. Report the deletion as unknown
+# without asking it to analyse with a policy supplied by the change.
+missing_policy() {
+	status=unknown
+	policy_digest=sha256:$(sha256_hex "$policy_copy")
+	payload=$out/archfit-result.json
+	jq -n --arg schema "$RESULT_SCHEMA" --arg head "$head" --arg base "$merge_base" \
+		--arg path "$POLICY" --arg target "refs/remotes/origin/$target_branch" \
+		--arg digest "$policy_digest" --arg date "$(date -u +%F)" --arg engine "${engine_version#v}" \
+		'{schema: $schema, status: "unknown", summary: "archfit: unknown",
+		  errors: [], unknown: [{path: $path, cause: "policy",
+		    what: "the policy is missing at the analysed commit",
+		    why: "only owners change the policy",
+		    next: {kind: "restore", text: ("git checkout " + $target + " -- " + $path)}}],
+		  policy: {path: $path, digest: $digest, protected: false, differs: true, target: $target},
+		  base: $base, head: $head, date: $date, engine: $engine}' >"$payload"
 }
 
 # check runs `archfit check` once. The exit code is the status: 0 pass, 1 fail, 2 unknown.
@@ -262,7 +290,9 @@ write_summary() {
 	elif [[ $event == merge_group ]]; then
 		what="merge group commit \`$head\` on base \`$group_base\`"
 	fi
-	if [[ $policy_source == target ]]; then
+	if [[ $policy_source == missing ]]; then
+		policy="\`$POLICY\` is missing at the analysed commit; the Action reports unknown without running the engine"
+	elif [[ $policy_source == target ]]; then
 		policy="\`$POLICY\` of the target tip, \`sha256:$(sha256_hex "$policy_copy")\`"
 	elif [[ $head == "$target_sha" ]]; then
 		policy="\`$POLICY\` of the checkout, which is the target tip"
@@ -285,7 +315,11 @@ if ! select_policy; then
 	exit 0
 fi
 engine_identity
-check
+if [[ $policy_source == missing ]]; then
+	missing_policy
+else
+	check
+fi
 write_facts
 write_summary
 printf 'archfit: %s %s status=%s result=%s\n' "$event" "$head" "$status" "$payload"

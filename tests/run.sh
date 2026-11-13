@@ -74,6 +74,10 @@ git -C "$origin" checkout --quiet -b drop "$c1"
 git -C "$origin" rm --quiet .archfit.yaml
 commit_all "$origin" "drop: delete the policy"
 d1=$(git -C "$origin" rev-parse HEAD)
+git -C "$origin" checkout --quiet -b deny "$c1"
+printf 'package a\n\nimport "example.com/single/pkg/c"\n\nfunc UseC() string { return c.Hi() }\n' >"$origin/pkg/a/c.go"
+commit_all "$origin" "deny: a calls c"
+deny1=$(git -C "$origin" rev-parse HEAD)
 # Merge groups for the queue of main, built on c2 as GitHub builds them: gc holds f1 (code
 # only); ge holds e1, so it edits the policy.
 group() { # BRANCH PULL-REQUEST-HEAD: a group commit merging the head onto c2
@@ -125,7 +129,7 @@ begin() { # NAME
 	stop_app
 	new_case "$1"
 	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_RESULT=$results/pass.json
-	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_CACHE_PROBE
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -219,10 +223,13 @@ expect "container gets only fixed HOME and checkout-scoped Git trust" \
 expect "no env file" json_ok 'index("--env-file") == null' "$options"
 expect "no token or OIDC variable reaches the container" \
 	json_ok '[.options[], .args[]] | map(select(test("ACTIONS_|TOKEN"))) == []' "$(engine_call check)"
-expect "the mounts: the checkout, .git read-only, the policy copy read-only; nothing else" json_ok \
-	'[range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]] ==
-	  [$s + ":/src", $s + "/.git:/src/.git:ro", $p + ":/archfit/policy/.archfit.yaml:ro"]' \
-	"$options" --arg s "$GITHUB_WORKSPACE" --arg p "$RUNNER_TEMP/archfit/policy/.archfit.yaml"
+expect "the mounts: checkout, read-only git and policy, and an isolated writable cache" json_ok \
+	'[range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]] as $v |
+	  $v[0:2] == [$s + ":/src", $s + "/.git:/src/.git:ro"] and
+	  ($v[2] | startswith($c)) and ($v[2] | endswith(":/src/.archfit-cache:rw")) and
+	  $v[3:] == [$p + ":/archfit/policy/.archfit.yaml:ro"]' \
+	"$options" --arg s "$GITHUB_WORKSPACE" --arg c "$RUNNER_TEMP/archfit/cache." \
+	--arg p "$RUNNER_TEMP/archfit/policy/.archfit.yaml"
 expect "the image is pinned by digest and never pulled implicitly" \
 	json_ok '.image == $i and (.options | index("never")) != null' "$(engine_call check)" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
@@ -337,14 +344,51 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error says there is no verdict" log_has "has no verdict (status unknown)"
 expect "the envelope is still written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 
-begin "pull request that deletes the policy: the engine runs and compares"
+begin "pull request that deletes the policy: unknown without invoking the legacy checker"
 on_pull_request "$d1" "$c2"
-export FAKE_RESULT=$results/policy-differs.json
-start_app "[$ok_answer]"
+export FAKE_RESULT=none FAKE_CHECK_RC=3
+start_app '[{"status": 200, "body": {"status": "unknown"}}]'
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
-expect "no --policy" check_args "$checkout_args"
+expect_eq "no engine container runs" 0 "$(engine_calls)"
+expect_eq "verdict" unknown "$(out verdict)"
 expect_eq "the result is uploaded" 1 "$(requests upload)"
+expect "the result names the missing policy at the analysed commit" jq -e \
+	'.status == "unknown" and .unknown[0].cause == "policy" and
+	 .unknown[0].what == "the policy is missing at the analysed commit"' "$(out payload-file)"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "the envelope names the target policy bytes" "sha256:$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(envelope_field policy_digest)"
+expect_eq "the result names the checked commit and merge base" "$d1 $c1" \
+	"$(jq -r '"\(.head) \(.base)"' "$(out payload-file)")"
+
+begin "policy deletion without an App is still an unknown gate failure"
+on_pull_request "$d1" "$c2"
+export FAKE_RESULT=none FAKE_CHECK_RC=3
+run_action "$origin"
+expect_eq "the action fails closed" 1 "$action_rc"
+expect_eq "no engine container runs" 0 "$(engine_calls)"
+expect "the job explains the unknown verdict, not an engine crash" log_has "has no verdict (status unknown)"
+
+begin "checkout-provided facts cannot hide a denied dependency or receive engine writes"
+on_pull_request "$deny1" "$c2"
+export FAKE_RESULT=$results/fail.json FAKE_CACHE_PROBE=1
+action_rc=0
+{
+	bash "$root/scripts/prepare.sh" &&
+		checkout "$origin" "$(out ref)" &&
+		mkdir -p "$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts" &&
+		printf '{"facts":{"imports":[]}}\n' >"$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts/poisoned.json" &&
+		ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) bash "$root/scripts/run.sh" &&
+		ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
+} >"$case_dir/log" 2>&1 || action_rc=$?
+expect_eq "the denied dependency still fails" 1 "$action_rc"
+expect_eq "verdict" fail "$(out verdict)"
+cache_mount=$(engine_call check | jq -r '[.options[] | select(endswith(":/src/.archfit-cache:rw"))][0]')
+cache_host=${cache_mount%:/src/.archfit-cache:rw}
+expect "the engine writes its cache outside the checkout" test -f "$cache_host/engine-write"
+expect_eq "the checkout cache has only the planted file" 1 "$(find "$GITHUB_WORKSPACE/.archfit-cache" -type f | wc -l | tr -d ' ')"
+expect_eq "the planted file is unchanged" '{"facts":{"imports":[]}}' "$(<"$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts/poisoned.json")"
+expect "the result contains the denied dependency" jq -e '[.errors[].rule] | index("no-a-to-c") != null' "$(out payload-file)"
 
 # --- A re-run reads the target tip as it is then (design 10.5) -----------------------
 

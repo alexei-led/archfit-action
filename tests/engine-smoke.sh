@@ -5,7 +5,7 @@
 # with the pinned platform image and no App endpoint. App admission is a separate gate.
 # It proves the identity the action derives; that the engine judges with exactly the
 # target tip's policy blob the action mounts; that the change, its merge base and the
-# target tip work through the read-only .git mount, with the engine's own cache and an
+# target tip work through the read-only .git mount, with a fresh isolated cache and an
 # untracked file in the checkout; and the statuses of design 9.1 and 10.5: a pull request
 # that passes, one that fails, one that edits the policy, a re-run after an owner's
 # answer, a merge group, and a push at the tip with the repository state.
@@ -54,6 +54,10 @@ branch edit
 printf '# loosened by the change\n' >>"$origin/.archfit.yaml"
 commit_all "$origin" "edit: the policy"
 e1=$(git -C "$origin" rev-parse HEAD)
+branch drop
+git -C "$origin" rm --quiet .archfit.yaml
+commit_all "$origin" "drop: the policy"
+d1=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet -b queue "$c2"
 git_as_test -C "$origin" merge --quiet --no-ff -m "group: pass" "$p1" >/dev/null
 g1=$(git -C "$origin" rev-parse HEAD)
@@ -91,7 +95,8 @@ expect_eq "identity derived from the image" "$ENGINE_VERSION $ENGINE_PLATFORM $E
 	"$(fact engine_version) $(fact platform) $(fact image_digest)"
 expect "the result carries the repository state" result_has '.repository.state == "clean"'
 expect_eq "the result names the checked commit" "$c2" "$(jq -r .head "$(out payload-file)")"
-expect "the engine wrote its cache through the read-only .git" test -d "$GITHUB_WORKSPACE/.archfit-cache"
+expect "the engine wrote its cache outside the checkout" test -d "$RUNNER_TEMP"/archfit/cache.*/facts/checkfacts
+expect "the checkout has no engine cache entries" test ! -e "$GITHUB_WORKSPACE/.archfit-cache/facts"
 expect "the envelope conforms to the App schema" valid
 export_result push-at-tip
 
@@ -116,6 +121,39 @@ expect_eq "status" fail "$(out verdict)"
 expect "the rule is named" result_has '[.errors[].rule] | index("no-a-to-c") != null'
 expect "the envelope conforms to the App schema" valid
 export_result fail
+
+# Turn real engine cache entries into an attack: preserve their keys and source facts,
+# but erase the dependency the deny branch introduced.
+poisoned=$tmp/poisoned-cache
+mkdir -p "$poisoned/facts/checkfacts"
+for file in "$RUNNER_TEMP"/archfit/cache.*/facts/checkfacts/*.json; do
+	jq '.facts.imports |= map(select(.target != "pkg/c"))' "$file" >"$poisoned/facts/checkfacts/${file##*/}"
+done
+
+new_case "checkout-supplied facts cannot hide a denied dependency"
+on_pull_request "$x1" "$c2"
+action_rc=0
+{
+	bash "$root/scripts/prepare.sh" &&
+		checkout "$origin" "$(out ref)" &&
+		cp -R "$poisoned" "$GITHUB_WORKSPACE/.archfit-cache" &&
+		ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) bash "$root/scripts/run.sh" &&
+		ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
+} >"$case_dir/log" 2>&1 || action_rc=$?
+expect_eq "the denied dependency still fails" 1 "$action_rc"
+expect_eq "status" fail "$(out verdict)"
+expect "the denied rule is still reported" result_has '[.errors[].rule] | index("no-a-to-c") != null'
+expect "the checkout cache is unchanged by the engine" diff -r "$poisoned" "$GITHUB_WORKSPACE/.archfit-cache"
+expect "the engine used a fresh cache outside the checkout" test -d "$RUNNER_TEMP"/archfit/cache.*/facts/checkfacts
+expect "the envelope conforms to the App schema" valid
+
+new_case "pull request that deletes the policy: unknown without the legacy checker"
+on_pull_request "$d1" "$c2"
+run_action "$origin"
+expect_eq "the job fails closed" 1 "$action_rc"
+expect_eq "status" unknown "$(out verdict)"
+expect "the result names the missing policy" result_has '.unknown[0].what == "the policy is missing at the analysed commit"'
+expect "the envelope conforms to the App schema" valid
 
 new_case "pull request that edits the policy: unknown, judged by nothing it brings"
 on_pull_request "$e1" "$c2"

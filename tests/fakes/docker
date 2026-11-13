@@ -9,6 +9,7 @@
 #                        "none" prints nothing, as the engine does on a usage or tool error
 #   FAKE_ENGINE_VERSION  version that `--version` reports (default v4.0.0-rc.1)
 #   FAKE_PLATFORM        os/arch that `image inspect` reports (default linux/amd64)
+#   FAKE_CACHE_PROBE     simulate cache reads/writes when set to 1
 #   FAKE_CHECK_RC        exit code of `check`; default is the one its status implies
 #                        (pass 0, fail 1, unknown 2), and 2 with FAKE_RESULT=none
 #
@@ -80,6 +81,23 @@ case ${1:-} in
 	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v4.0.0-rc.1}"
 	;;
 check)
+	if [[ ${FAKE_CACHE_PROBE:-0} == 1 ]]; then
+		cache=""
+		for ((i = 0; i + 1 < ${#options[@]}; i++)); do
+			if [[ ${options[i]} == --volume ]]; then
+				case ${options[i + 1]} in
+				*:/src) cache=${options[i + 1]%:/src}/.archfit-cache ;;
+				*:/src/.archfit-cache:rw) cache=${options[i + 1]%:/src/.archfit-cache:rw} ;;
+				esac
+			fi
+		done
+		[[ -d $cache ]] || exit 125
+		if [[ -f $cache/facts/checkfacts/poisoned.json ]]; then
+			cat "$(dirname "$FAKE_RESULT")/pass.json"
+			exit 0
+		fi
+		printf 'engine wrote here\n' >"$cache/engine-write"
+	fi
 	if [[ -n $policy_arg && -z $policy_digest ]]; then
 		echo "archfit: read $policy_arg: open $policy_arg: no such file or directory" >&2
 		exit 2
