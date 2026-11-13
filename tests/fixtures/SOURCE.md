@@ -1,11 +1,11 @@
 # Fixture provenance
 
-INTERIM: emitted by a native build of archfit `513e72ba` (there is no image with the engine fixes yet). They are replaced by the results the pinned image emits through `tests/engine-smoke.sh` (`ARCHFIT_FIXTURES_OUT`) before the pull request leaves draft.
+Emitted unchanged by a native build of archfit commit `5aee74a8771abf86aa0557b84f48776c44cb3336`, using the scenarios in `tests/engine-smoke.sh`. The result `engine` field is the development version `3.4.0-53-g5aee74a8`. These are not image outputs; the release image digest pin and image fixtures are task 30.
 
 | File | SHA-256 |
 | --- | --- |
-| `result/eol-differs.json` | `24d4c40888da2de53464b91dd803613baaba07365e7a18a4dde9922459a39ef7` |
-| `result/fail.json` | `0ac25948c254e7e1e6a2bc6a6d8dc7b6b3f55561f64ef59028b5007d122f9511` |
-| `result/pass.json` | `b74783fc2dd9a4a22c2d2e6372d553b1d71656b735513b182e00664b9c976c21` |
-| `result/policy-differs.json` | `37feabbdf1ab3d9fc7d53e471e7e00f09a42b6183593395212b188cdfc5f87d2` |
-| `result/push-at-tip.json` | `aad7c11c722d8515864de28276ee8fce2da9bd03759e96b2191d2239f3034d0c` |
+| `result/eol-differs.json` | `b1e10fcbf2c213ca77a01530bd105c8068754a674e3f650f4b42b60f36696360` |
+| `result/fail.json` | `33093c5c7742bc294fa771534b9d9f2d17130fdbd14f8358a81d152f672ce7c2` |
+| `result/pass.json` | `ff0d5d5c2c5ea00e156d1cb1c4303a0b914e1e636efa3b68088211ba2ff2453b` |
+| `result/policy-differs.json` | `e850667959f3f1d0662aeb269fef0f4ef56db4349578c93b8492cb5a1fef082c` |
+| `result/push-at-tip.json` | `b0023156a49d0143d6f90ffa7d0e8c0572859a0e668642c6a448a36e04b2f991` |

@@ -42,13 +42,13 @@
   ],
   "unknown": [],
   "policy": {
-    "path": "/tmp/archfit/policy/.archfit.yaml",
-    "digest": "sha256:eca48b67757e4bc199d54ca8c37e4f8f6c4ccec9b36074ffb9d22acbc953db23",
+    "path": "/Users/alexei/Workspace/archfit-action.worktrees/m2-action-check/.pi/m2-refresh/policy.yaml",
+    "digest": "sha256:fd57fe49c3865871d78810aef07a31e7a843d94df00b43c9b1a5a0de819fa13e",
     "protected": false,
     "differs": false
   },
-  "base": "c85656551c85549363a542867bc425052b35cc6a",
-  "head": "fe0fdc92bab05c41b475c9a18e6921d84dc3f350",
+  "base": "e0e9681b4111f53416972c23da5d5e0c57dcb30a",
+  "head": "0fa9244eae4c5bdf2ecb385af533b4d148ed8206",
   "date": "2026-11-13",
-  "engine": "v4.0.0-dev.513e72b"
+  "engine": "3.4.0-53-g5aee74a8"
 }
