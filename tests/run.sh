@@ -4,19 +4,18 @@
 # The shipped scripts run unchanged, in action.yml order (prepare, checkout, run,
 # report), against scratch git repositories and recorded event payloads. Only the
 # process and network boundaries are faked: a docker shim stands in for the engine
-# image and replays a real archfit state document, a local server plays the App and
-# the OIDC token service, and a no-op sleep replaces the backoff clock. Every
-# envelope the scripts write is validated against the vendored App schema, and
-# known-bad envelopes must fail the same validator.
+# image and replays results the engine emitted (tests/fixtures/result), a local server
+# plays the App and the OIDC token service, and a no-op sleep replaces the backoff
+# clock. Every envelope the scripts write is validated against the vendored App
+# schema, and known-bad envelopes must fail the same validator.
 #
-# Needs bash, git, jq, curl, python3 and go, plus ARCHFIT_TEST_STATE: a real
-# archfit.architecture-state.v1 document (the vendored release capture is hash-pinned in CI).
+# Needs bash, git, jq, curl, python3 and go.
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 # shellcheck source=tests/helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
 
-state_doc=${ARCHFIT_TEST_STATE:?set ARCHFIT_TEST_STATE to a real archfit.architecture-state.v1 document}
+results=$root/tests/fixtures/result
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/archfit-action-tests.XXXXXX")
 app_pid=""
 stop_app() {
@@ -27,7 +26,7 @@ stop_app() {
 }
 trap 'stop_app; rm -rf "$tmp"' EXIT
 
-schema=$root/schema/envelope.v1.schema.json
+schema=$root/schema/envelope.v2.schema.json
 validator=$tmp/validate
 build_validator "$validator"
 
@@ -41,50 +40,53 @@ EOF
 chmod +x "$tmp/bin/docker" "$tmp/bin/sleep"
 export PATH=$tmp/bin:$PATH
 
-# Fixture: main (c1) holds code, policy, baseline and labels; feature (f1) branches
-# from c1 and edits the policy; main then moves on (c2) and edits only the labels.
-# YAML checks out with CRLF line ends, so working-tree bytes differ from blob bytes.
+git_as_test() { git -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false "$@"; }
+# replace FILE FROM TO: one textual edit, the same with GNU and BSD tools.
+replace() {
+	local text
+	text=$(<"$1")
+	printf '%s\n' "${text/"$2"/"$3"}" >"$1"
+}
+
+# Fixture: main (c1) holds code and policy; feature (f1) branches from c1 and changes code
+# only; main then moves on (c2) and changes only the policy's owners. edit (e1) branches
+# from c1 and edits the policy; drop (d1) deletes it. YAML checks out with CRLF line ends,
+# so working-tree bytes differ from blob bytes.
 origin=$tmp/origin
 git init --quiet -b main "$origin"
 write_module "$origin"
 printf '*.yaml text eol=crlf\n' >"$origin/.gitattributes"
-printf '{"schema_version":"archfit.baseline.v3","accepted":[]}\n' >"$origin/.archfit-baseline.json"
-printf 'labels: []\n' >"$origin/.archfit-labels.yaml"
-commit_all "$origin" "code, policy, baseline and labels"
+commit_all "$origin" "code and policy"
 c1=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet -b feature
-printf '# candidate policy\n' >>"$origin/.archfit.yaml"
-printf '\n// Twice calls b twice.\nfunc Twice() string { return b.Hello() + b.Hello() }\n' >>"$origin/pkg/a/a.go"
-commit_all "$origin" "feature: candidate policy"
+printf '\n// Twice calls b twice.\nfunc Twice() string { return UseB() + UseB() }\n' >>"$origin/pkg/a/a.go"
+commit_all "$origin" "feature: code only"
 f1=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet main
-printf 'labels: []\n# moved on main\n' >"$origin/.archfit-labels.yaml"
-commit_all "$origin" "main: labels"
+replace "$origin/.archfit.yaml" "owners: [acme-owner]" "owners: [acme-owner, acme-second]"
+commit_all "$origin" "main: a second owner"
 c2=$(git -C "$origin" rev-parse HEAD)
-# drop (d1) branches from c1 and deletes the policy.
+git -C "$origin" checkout --quiet -b edit "$c1"
+printf '# loosened by the change\n' >>"$origin/.archfit.yaml"
+commit_all "$origin" "edit: the policy"
+e1=$(git -C "$origin" rev-parse HEAD)
 git -C "$origin" checkout --quiet -b drop "$c1"
 git -C "$origin" rm --quiet .archfit.yaml
 commit_all "$origin" "drop: delete the policy"
 d1=$(git -C "$origin" rev-parse HEAD)
-# m2 is the test merge commit GitHub computes for feature (f1) into main (c2): parents c2, f1.
-git -C "$origin" checkout --quiet -b merge-f1 "$c2"
-git -C "$origin" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "merge f1 into c2" "$f1"
-m2=$(git -C "$origin" rev-parse HEAD)
-git -C "$origin" checkout --quiet main
-# Merge groups for the queue of main, built on c2 as GitHub builds them: gc holds o1 (a
-# code-only pull request); g2 holds f1 then o1, so it changes the policy.
-git -C "$origin" checkout --quiet -b other "$c2"
-printf '// other\n' >>"$origin/pkg/b/b.go"
-commit_all "$origin" "other: code only"
-o1=$(git -C "$origin" rev-parse HEAD)
-group() { # BRANCH FROM PULL-REQUEST-HEAD: a group commit merging the head onto FROM
-	git -C "$origin" checkout --quiet -b "$1" "$2"
-	git -C "$origin" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff -m "group $1" "$3"
+git -C "$origin" checkout --quiet -b deny "$c1"
+printf 'package a\n\nimport "example.com/single/pkg/c"\n\nfunc UseC() string { return c.Hi() }\n' >"$origin/pkg/a/c.go"
+commit_all "$origin" "deny: a calls c"
+deny1=$(git -C "$origin" rev-parse HEAD)
+# Merge groups for the queue of main, built on c2 as GitHub builds them: gc holds f1 (code
+# only); ge holds e1, so it edits the policy.
+group() { # BRANCH PULL-REQUEST-HEAD: a group commit merging the head onto c2
+	git -C "$origin" checkout --quiet -b "$1" "$c2"
+	git_as_test -C "$origin" merge --quiet --no-ff -m "group $1" "$2" >/dev/null
 	git -C "$origin" rev-parse HEAD
 }
-gc=$(group queue-code "$c2" "$o1")
-g2=$(group queue-two "$m2" "$o1")
-gd=$(group queue-drop "$c2" "$d1")
+gc=$(group queue-code "$f1")
+ge=$(group queue-edit "$e1")
 git -C "$origin" checkout --quiet main
 
 # Criss-cross: x2 and y2 each merge the other's first commit, so they have two merge bases.
@@ -92,7 +94,7 @@ cross=$tmp/cross
 git init --quiet -b main "$cross"
 write_module "$cross"
 commit_all "$cross" "code and policy"
-merge() { git -C "$cross" -c user.name=test -c user.email=test@example.com merge --quiet --no-ff --no-edit "$1"; }
+merge() { git_as_test -C "$cross" merge --quiet --no-ff --no-edit "$1"; }
 git -C "$cross" checkout --quiet -b x
 printf '// x\n' >>"$cross/pkg/a/a.go"
 commit_all "$cross" "x1"
@@ -105,19 +107,20 @@ merge "$y1"
 x2=$(git -C "$cross" rev-parse HEAD)
 git -C "$cross" checkout --quiet y
 merge "$(git -C "$cross" rev-parse x~1)"
-y2=$(git -C "$cross" rev-parse HEAD)
 git -C "$cross" checkout --quiet main
-cm=$(git -C "$cross" rev-parse main) # a default-branch head with a policy and no labels file
 
+# no_policy: code without a policy (np); its branch first (p1) proposes the first one.
 no_policy=$tmp/no-policy
 git init --quiet -b main "$no_policy"
 write_module "$no_policy"
-rm "$no_policy/.archfit.yaml"
+mv "$no_policy/.archfit.yaml" "$tmp/first-policy.yaml"
 commit_all "$no_policy" "code without a policy"
 np=$(git -C "$no_policy" rev-parse HEAD)
-
-draft=$tmp/draft.yaml
-git -C "$origin" show "$c1:.archfit.yaml" >"$draft"
+git -C "$no_policy" checkout --quiet -b first
+cp "$tmp/first-policy.yaml" "$no_policy/.archfit.yaml"
+commit_all "$no_policy" "first: the first policy"
+p1=$(git -C "$no_policy" rev-parse HEAD)
+git -C "$no_policy" checkout --quiet main
 
 # From here a failing check is recorded, not fatal.
 set +e
@@ -125,10 +128,8 @@ set +e
 begin() { # NAME
 	stop_app
 	new_case "$1"
-	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_FIXTURES=$root/tests/fixtures
-	export FAKE_STATE=$state_doc FAKE_DRAFT=$draft
-	unset FAKE_COMPARE FAKE_COMPARE_RC FAKE_COMPARE_NO_SECTION FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_BASELINE_COMPARABLE FAKE_BASELINE FAKE_REANCHOR_RC \
-		FAKE_BASE_RC FAKE_BASE_SYMLINK FAKE_BASE_LOCKED
+	export FAKE_DOCKER_LOG=$case_dir/docker.log FAKE_SLEEP_LOG=$case_dir/sleep.log FAKE_RESULT=$results/pass.json
+	unset FAKE_CHECK_RC FAKE_ENGINE_VERSION FAKE_PLATFORM FAKE_CACHE_PROBE
 	: >"$FAKE_DOCKER_LOG"
 	: >"$FAKE_SLEEP_LOG"
 }
@@ -158,81 +159,62 @@ requests() { # KIND: how many requests of KIND (upload|token) the App saw
 upload_field() { jq -rs --argjson n "$1" "map(select(.kind == \"upload\"))[\$n] | $2" "$case_dir/app.log"; }
 token_query() { jq -rs 'map(select(.kind == "token"))[0].query' "$case_dir/app.log"; }
 check_calls() { jq -cs 'map(select(.command == "run" and .args[0] == "check"))' "$FAKE_DOCKER_LOG"; }
-compare_calls() { jq -s 'map(select(.command == "run" and .args[0] == "config")) | length' "$FAKE_DOCKER_LOG"; }
 engine_calls() { jq -s 'map(select(.command == "run")) | length' "$FAKE_DOCKER_LOG"; }
 engine_call() { jq -cs --arg a "$1" 'map(select(.command == "run" and .args[0] == $a))[0]' "$FAKE_DOCKER_LOG"; }
 json_ok() { jq -e "$1" "${@:3}" <<<"$2" >/dev/null; } # FILTER JSON [JQ ARGS]
 valid_envelope() { "$validator" "$schema" "$1=$2" >"$case_dir/validator.out" 2>&1; }
 sha_of() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
-ok_answer='{"status": 200, "body": {"conclusion": "success", "reason": "healthy"}}'
-proposed_answer='{"status": 200, "body": {"pull_request": 12, "url": "https://github.com/acme/shop/pull/12"}}'
+ok_answer='{"status": 200, "body": {"status": "pass"}}'
 summary_has() { grep -qF -- "$1" "$GITHUB_STEP_SUMMARY"; }
-sized_baseline() { # BYTES: print the path of a baseline file of exactly BYTES bytes
-	local prefix='{"schema_version":"archfit.baseline.v3","accepted":[]}'
-	{
-		printf '%s' "$prefix"
-		head -c $(($1 - ${#prefix})) /dev/zero | tr '\0' ' '
-	} >"$case_dir/baseline-$1.json"
-	printf '%s' "$case_dir/baseline-$1.json"
-}
+# check_args JSON-ARRAY: the engine arguments of the case's one check call equal it.
+check_args() { json_ok '.args == $want' "$(engine_call check)" --argjson want "$1"; }
+target_args='["check", "--format", "json", "--base", "refs/remotes/origin/main", "--policy", "/archfit/policy/.archfit.yaml"]'
+checkout_args='["check", "--format", "json", "--base", "refs/remotes/origin/main"]'
 
 # --- Contract provenance -----------------------------------------------------------
 
-begin "vendored schema matches SCHEMA_SOURCE"
-expect_eq "schema/envelope.v1.schema.json sha256" \
+begin "vendored schema and fixtures match their sources"
+expect_eq "schema/envelope.v2.schema.json sha256" \
 	"$(sed -n 's/^sha256: //p' "$root/schema/SCHEMA_SOURCE")" "$(sha_of "$schema")"
+expect_eq "SCHEMA_SOURCE names the vendored path" internal/wire/envelope/envelope.v2.schema.json \
+	"$(sed -n 's/^path: //p' "$root/schema/SCHEMA_SOURCE")"
+for fixture in "$results"/*.json; do
+	name=result/$(basename "$fixture")
+	expect_eq "$name matches tests/fixtures/SOURCE.md" \
+		"$(sed -n "s/^| \`${name//\//\\/}\` | \`\([0-9a-f]\{64\}\)\` |\$/\1/p" "$root/tests/fixtures/SOURCE.md")" "$(sha_of "$fixture")"
+done
 
-# --- Envelopes per event, produced by the shipped scripts ----------------------------
+# --- One check per trigger ------------------------------------------------------------
 
-begin "pull_request report: the merge result is analysed, per-file trusted inputs, envelope and upload"
-on_pull_request "$f1" "$c2" acme/shop "$m2"
+begin "pull request: the head is checked, the policy is the target tip's blob, envelope 2 and upload"
+on_pull_request "$f1" "$c2"
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 envelope=$(out envelope-file) payload=$(out payload-file)
 expect "the envelope conforms to the App schema" valid_envelope "$envelope" "$payload"
 cp "$envelope" "$tmp/pull_request.envelope"
-expect_eq "kind" report "$(envelope_field kind)"
-expect_eq "event" pull_request "$(envelope_field event)"
-expect_eq "pull request number" 42 "$(envelope_field pull_request)"
+cp "$payload" "$tmp/pull_request.result"
+expect_eq "schema_version" archfit.upload-envelope.v2 "$(envelope_field schema_version)"
+expect_eq "event and pull request number" "pull_request 42" "$(envelope_field event) $(envelope_field pull_request)"
 expect_eq "head_sha is the pull request head, not GITHUB_SHA" "$f1" "$(envelope_field head_sha)"
-expect_eq "base_sha is the event's base.sha" "$c2" "$(envelope_field base_sha)"
-expect_eq "merge_base_sha" "$c1" "$(envelope_field merge_base_sha)"
-expect_eq "analyzed_sha is the test merge commit" "$m2" "$(envelope_field analyzed_sha)"
-expect_eq "integration" merged "$(envelope_field integration)"
-expect_eq "the checkout is the merge commit" "$m2" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-expect "the merge holds the pull request's change" grep -q 'Twice' "$GITHUB_WORKSPACE/pkg/a/a.go"
-expect "the merge holds the target's change" grep -q 'moved on main' "$GITHUB_WORKSPACE/.archfit-labels.yaml"
-expect_eq "run_id is an integer" number "$(jq -r '.run_id | type' "$envelope")"
-expect_eq "engine identity" "v3.4.0 $ENGINE_DIGEST linux/amd64" \
+expect_eq "the checkout is the head" "$f1" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+expect_eq "merge_base_sha is merge-base(head, target tip)" "$c1" "$(envelope_field merge_base_sha)"
+expect_eq "target_ref" refs/heads/main "$(envelope_field target_ref)"
+expect_eq "target_sha is the target tip fetched in this run, not the event's base" "$c2" "$(envelope_field target_sha)"
+expect_eq "policy_digest is the digest the result names" \
+	"$(jq -r .policy.digest "$payload")" "$(envelope_field policy_digest)"
+expect_eq "run_id and run_attempt are integers" "number number" \
+	"$(jq -r '[.run_id, .run_attempt] | map(type) | join(" ")' "$envelope")"
+expect_eq "engine identity" "$ENGINE_VERSION $ENGINE_DIGEST linux/amd64" \
 	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
-check_call=$(engine_call check)
-expect_eq "the engine reads the policy the pull request changes from its head" \
-	"$(blob_sha256 "$origin" "$f1:.archfit.yaml")" "$(jq -r '.bundle[".archfit.yaml"]' <<<"$check_call")"
-expect_eq "labels changed only on main come from the base tip" \
-	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
-expect_eq "baseline digest is the digest of the bytes the engine read" \
-	"$(jq -r '.bundle[".archfit-baseline.json"]' <<<"$check_call")" "$(envelope_field baseline_digest)"
-expect_eq "labels digest is the digest of the bytes the engine read" \
-	"$(jq -r '.bundle[".archfit-labels.yaml"]' <<<"$check_call")" "$(envelope_field labels_digest)"
-expect "the checkout has CRLF labels (fixture sanity)" grep -q $'\r' "$GITHUB_WORKSPACE/.archfit-labels.yaml"
-expect "digests are of git blobs, not of CRLF working-tree files" \
-	test "$(sha_of "$GITHUB_WORKSPACE/.archfit-labels.yaml")" != "$(envelope_field labels_digest)"
-expect_eq "one upload" 1 "$(requests upload)"
-expect_eq "route" /v1/reports "$(upload_field 0 .path)"
-expect_eq "the header carries the envelope file byte for byte" "$(<"$envelope")" "$(upload_field 0 .envelope)"
-expect_eq "the body is the payload the envelope digests" \
-	"$(envelope_field payload_digest)" "sha256:$(upload_field 0 .body_sha256)"
-expect_eq "content type" application/json "$(upload_field 0 .content_type)"
-expect_eq "authorization is the minted OIDC token" "Bearer oidc-1" "$(upload_field 0 .authorization)"
-expect_eq "the token audience is the endpoint, URL-encoded" \
-	"api-version=2.0&audience=$(jq -rn --arg a "$ARCHFIT_ENDPOINT" '$a | @uri')" "$(token_query)"
-expect_eq "app-status" 200 "$(out app-status)"
-expect_eq "app-answer" '{"conclusion":"success","reason":"healthy"}' "$(out app-answer)"
-expect_eq "verdict" blocked "$(out verdict)"
-expect_eq "artifact name the App's graph view reads" archfit-report "$(out artifact-name)"
-expect "the step summary lists the trusted inputs" grep -q 'Trusted input' "$GITHUB_STEP_SUMMARY"
-options=$(jq -c .options <<<"$check_call")
+expect "no v1 key is left" json_ok '[keys[] | select(IN("kind", "base_sha", "analyzed_sha", "integration",
+	"baseline_digest", "labels_digest", "policy_change"))] == []' "$(<"$envelope")"
+expect "engine arguments: one check against the full target ref, with the target's policy" check_args "$target_args"
+expect_eq "one engine check" 1 "$(check_calls | jq length)"
+expect_eq "the engine judges with the target tip's policy blob" \
+	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r .policy)"
+options=$(engine_call check | jq -c .options)
 expect "container runs as the workspace owner" \
 	json_ok 'index("--user") as $i | .[$i + 1] == $u' "$options" --arg u "$(id -u):$(id -g)"
 expect "container gets only fixed HOME and checkout-scoped Git trust" \
@@ -240,195 +222,267 @@ expect "container gets only fixed HOME and checkout-scoped Git trust" \
 	  ["HOME=/tmp", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/src"]' "$options"
 expect "no env file" json_ok 'index("--env-file") == null' "$options"
 expect "no token or OIDC variable reaches the container" \
-	json_ok '[.options[], .args[]] | map(select(test("ACTIONS_|TOKEN"))) == []' "$check_call"
-expect ".git is mounted read-only" json_ok 'index($g) != null' "$options" --arg g "$GITHUB_WORKSPACE/.git:/src/.git:ro"
-expect "each trusted input is mounted read-only over /bundle" json_ok \
-	'[.[] | select(endswith(":ro") and contains(":/bundle/"))] == [$i + "/.archfit.yaml:/bundle/.archfit.yaml:ro",
-	  $i + "/.archfit-baseline.json:/bundle/.archfit-baseline.json:ro", $i + "/.archfit-labels.yaml:/bundle/.archfit-labels.yaml:ro"]' \
-	"$options" --arg i "$RUNNER_TEMP/archfit/inputs"
-expect "/bundle itself is a separate, empty writable directory" json_ok \
-	'index($b) != null' "$options" --arg b "$RUNNER_TEMP/archfit/bundle:/bundle"
+	json_ok '[.options[], .args[]] | map(select(test("ACTIONS_|TOKEN"))) == []' "$(engine_call check)"
+expect "the mounts: checkout, read-only git and policy, and an isolated writable cache" json_ok \
+	'[range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]] as $v |
+	  $v[0:2] == [$s + ":/src", $s + "/.git:/src/.git:ro"] and
+	  ($v[2] | startswith($c)) and ($v[2] | endswith(":/src/.archfit-cache:rw")) and
+	  $v[3:] == [$p + ":/archfit/policy/.archfit.yaml:ro"]' \
+	"$options" --arg s "$GITHUB_WORKSPACE" --arg c "$RUNNER_TEMP/archfit/cache." \
+	--arg p "$RUNNER_TEMP/archfit/policy/.archfit.yaml"
 expect "the image is pinned by digest and never pulled implicitly" \
-	json_ok '.image == $i and (.options | index("never")) != null' "$check_call" \
+	json_ok '.image == $i and (.options | index("never")) != null' "$(engine_call check)" \
 	--arg i "ghcr.io/alexei-led/archfit@$ENGINE_DIGEST"
-expect "engine arguments: the check compares with the event's base, which the merge commit contains" json_ok \
-	'.args == ["check", "--json", "--refresh", "--progress=none", "-c", "/bundle/.archfit.yaml", "--root", "/src", "--base", $m]' \
-	"$check_call" --arg m "$c2"
-expect_eq "one engine pass reports both sides" 1 "$(jq -s 'map(select(.command == "run" and .args[0] == "check")) | length' "$FAKE_DOCKER_LOG")"
-expect "the payload carries the origin of every finding" \
-	jq -e '.comparison.origin_status == "comparable" and (.comparison.introduced_finding_ids | length) == 1
-	  and all(.findings[]; .origin == "introduced" or .origin == "pre_existing")' "$payload"
-expect "only .git/worktrees is writable inside .git, from an empty RUNNER_TEMP directory" json_ok \
-	'[.[] | select(contains(":/src/.git"))] == [$s + "/.git:/src/.git:ro", $w + ":/src/.git/worktrees"]' \
-	"$options" --arg s "$GITHUB_WORKSPACE" --arg w "$RUNNER_TEMP/archfit/git-worktrees"
-expect "nothing of the base worktree is left in the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
-expect "the host .git/worktrees is an empty mountpoint" test -z "$(ls -A "$GITHUB_WORKSPACE/.git/worktrees")"
-expect "the step summary gives the origin counts" summary_has "Origin against the base: comparable, introduced 1, resolved 0"
-expect "the step summary names the merge commit" summary_has "merge commit \`$m2\`"
-
-begin "push report: trusted inputs from the pushed commit"
-on_push "$c2"
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "pull_request, base and merge base are empty off pull requests" "0||" \
-	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
-expect_eq "head_sha is the pushed commit" "$c2" "$(envelope_field head_sha)"
-expect_eq "analyzed_sha is the pushed commit, integration is empty" "$c2|" \
-	"$(envelope_field analyzed_sha)|$(envelope_field integration)"
-expect_eq "the policy comes from the pushed commit" \
-	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
-expect "no base comparison off pull requests" json_ok \
-	'(.args | index("--base")) == null and ([.options[] | select(contains("worktrees"))] == [])' "$(engine_call check)"
-expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
-expect "the step summary has no origin line" test -z "$(grep -F 'Origin against' "$GITHUB_STEP_SUMMARY")"
-
-begin "workflow_dispatch discovery: draft policy to /v1/discoveries"
-on_dispatch "$c2"
-export ARCHFIT_MODE=discovery
-start_app '[{"status": 200, "body": {"pull_request": 7, "url": "https://github.com/acme/shop/pull/7"}}]'
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "kind" discovery "$(envelope_field kind)"
-expect_eq "no input digests on discovery" "|" "$(envelope_field baseline_digest)|$(envelope_field labels_digest)"
-expect "no trusted input reaches discovery" json_ok '.bundle == {}' "$(engine_call config)"
-expect "engine arguments" json_ok '.args == ["config", "init", "--root", "/src", "--output", "-"]' "$(engine_call config)"
-expect_eq "route" /v1/discoveries "$(upload_field 0 .path)"
-expect_eq "content type" application/yaml "$(upload_field 0 .content_type)"
-expect_eq "the body is the engine's draft" "$(sha_of "$draft")" "$(upload_field 0 .body_sha256)"
-expect_eq "app-answer" '{"pull_request":7,"url":"https://github.com/acme/shop/pull/7"}' "$(out app-answer)"
-expect_eq "artifact name" archfit-policy "$(out artifact-name)"
-
-begin "workflow_dispatch baseline: captured, self-checked, proposed through /v1/baselines"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app "[$proposed_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-envelope=$(out envelope-file) payload=$(out payload-file)
-expect "the envelope conforms to the App schema" valid_envelope "$envelope" "$payload"
-cp "$envelope" "$tmp/baseline.envelope"
-expect_eq "kind" baseline "$(envelope_field kind)"
-expect_eq "event" workflow_dispatch "$(envelope_field event)"
-expect_eq "pull_request, base and merge base are empty" "0||" \
-	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
-expect_eq "head_sha is the default-branch head the run checked out" "$c2" "$(envelope_field head_sha)"
-expect_eq "no baseline digest: the capture reads no stored baseline" "" "$(envelope_field baseline_digest)"
-expect_eq "labels digest is the default-branch labels blob" \
-	"$(blob_sha256 "$origin" "$c2:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
-expect_eq "labels digest is the digest of the bytes the capture read" \
-	"$(engine_call baseline | jq -r '.bundle[".archfit-labels.yaml"]')" "$(envelope_field labels_digest)"
-expect_eq "engine identity" "v3.4.0 $ENGINE_DIGEST linux/amd64" \
-	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
-expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
-	'.args == ["baseline", "--refresh", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
-	 and (.bundle | keys) == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
-expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
-expect "the self-check requests fresh evidence" json_ok '.args | index("--refresh") != null' "$(engine_call check)"
 expect_eq "one upload" 1 "$(requests upload)"
-expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
+expect_eq "route" /v1/reports "$(upload_field 0 .path)"
 expect_eq "the header carries the envelope file byte for byte" "$(<"$envelope")" "$(upload_field 0 .envelope)"
-expect_eq "the body is the captured file" "$(sha_of "$payload")" "$(upload_field 0 .body_sha256)"
-expect_eq "the payload digest names the body" \
-	"$(envelope_field payload_digest)" "sha256:$(upload_field 0 .body_sha256)"
+expect_eq "the body is the engine's result, byte for byte" "$(sha_of "$results/pass.json")" "$(upload_field 0 .body_sha256)"
+expect_eq "the payload digest names the body" "$(envelope_field payload_digest)" "sha256:$(upload_field 0 .body_sha256)"
 expect_eq "content type" application/json "$(upload_field 0 .content_type)"
 expect_eq "authorization is the minted OIDC token" "Bearer oidc-1" "$(upload_field 0 .authorization)"
 expect_eq "the token audience is the endpoint, URL-encoded" \
 	"api-version=2.0&audience=$(jq -rn --arg a "$ARCHFIT_ENDPOINT" '$a | @uri')" "$(token_query)"
 expect_eq "app-status" 200 "$(out app-status)"
-expect_eq "app-answer" '{"pull_request":12,"url":"https://github.com/acme/shop/pull/12"}' "$(out app-answer)"
-expect_eq "the capture is still kept as an artifact" archfit-baseline "$(out artifact-name)"
-expect "the log names the pull request" log_has "baseline pull request #12 https://github.com/acme/shop/pull/12"
-expect "the step summary names the pull request" summary_has "baseline pull request #12 https://github.com/acme/shop/pull/12"
-expect "the step summary says an owner approves it" summary_has "architecture owner approves"
+expect_eq "app-answer" '{"status":"pass"}' "$(out app-answer)"
+expect_eq "verdict is the result's status" pass "$(out verdict)"
+expect_eq "artifact name the App reads the result from" archfit-result "$(out artifact-name)"
+expect "the step summary names the head" summary_has "head \`$f1\` of pull request #42"
+expect "the step summary names the target tip" summary_has "\`refs/heads/main\` at \`$c2\`"
+expect "the step summary names the policy's source" summary_has "of the target tip, \`sha256:$(blob_sha256 "$origin" "$c2:.archfit.yaml")\`"
 
-begin "push baseline without a labels file: both input digests empty"
-on_push "$cm"
-export ARCHFIT_MODE=baseline
-start_app "[$proposed_answer]"
-run_action "$cross"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "kind" baseline "$(envelope_field kind)"
-expect_eq "event" push "$(envelope_field event)"
-expect_eq "head_sha is the pushed default-branch commit" "$cm" "$(envelope_field head_sha)"
-expect_eq "pull_request, base and merge base are empty" "0||" \
-	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
-expect_eq "baseline and labels digests are empty" "|" \
-	"$(envelope_field baseline_digest)|$(envelope_field labels_digest)"
-expect "the capture read no labels" json_ok '.bundle | keys == [".archfit.yaml"]' "$(engine_call baseline)"
-expect_eq "route" /v1/baselines "$(upload_field 0 .path)"
-
-# --- Pull request integration: the merge commit, a conflict, a state GitHub has not computed ---
-
-begin "pull request the event reports as conflicting: the head is analysed alone"
-# Even when the job's GITHUB_SHA is a valid merge commit, the event's word wins.
-on_pull_request "$f1" "$c2" acme/shop "$m2"
-jq '.pull_request.mergeable = false' "$GITHUB_EVENT_PATH" >"$case_dir/conflict.json"
-export GITHUB_EVENT_PATH=$case_dir/conflict.json
+begin "push at the target tip: the engine reads the checkout's policy and adds the repository state"
+on_push "$c2"
+export FAKE_RESULT=$results/push-at-tip.json
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "head_sha and analyzed_sha are the head" "$f1 $f1" "$(envelope_field head_sha) $(envelope_field analyzed_sha)"
-expect_eq "integration" conflicts "$(envelope_field integration)"
-expect_eq "the checkout is the head" "$f1" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-expect "origin compares with the merge base, not the target tip" json_ok \
-	'.args[-2:] == ["--base", $m]' "$(engine_call check)" --arg m "$c1"
-expect "the step summary says the pull request conflicts" summary_has "analysed alone: the pull request conflicts with its base"
+cp "$(out envelope-file)" "$tmp/push.envelope"
+expect_eq "pull_request is 0 off pull requests" 0 "$(envelope_field pull_request)"
+expect_eq "head, merge base and target tip are the pushed commit" "$c2 $c2 $c2" \
+	"$(envelope_field head_sha) $(envelope_field merge_base_sha) $(envelope_field target_sha)"
+expect "no --policy: the tip's tree holds the tip's policy" check_args "$checkout_args"
+expect "no policy copy is mounted" json_ok '[.options[] | select(contains("/archfit/policy"))] == []' "$(engine_call check)"
+expect_eq "the body is the engine's result untouched, repository state included" \
+	"$(sha_of "$results/push-at-tip.json")" "$(upload_field 0 .body_sha256)"
+expect "the result carries the repository state (fixture sanity)" jq -e '.repository.state == "clean"' "$(out payload-file)"
+expect "the step summary says the checkout is the tip" summary_has "of the checkout, which is the target tip"
 
-begin "event whose mergeable and merge_commit_sha GitHub has not filled in yet: the run's merge commit is used"
-on_pull_request "$f1" "$c2" acme/shop "$m2"
-jq '.pull_request.mergeable = null | .pull_request.merge_commit_sha = null' "$GITHUB_EVENT_PATH" >"$case_dir/pending.json"
-export GITHUB_EVENT_PATH=$case_dir/pending.json
+begin "push at the tip of a repository whose .gitattributes converts the policy: unknown"
+# The engine compares the checkout's CRLF file with the tip's LF blob (engine-emitted).
+on_push "$c2"
+export FAKE_RESULT=$results/eol-differs.json
+run_action "$origin"
+expect "no --policy at the tip, so the engine reads the converted working-tree file" check_args "$checkout_args"
+expect_eq "the job fails: without an App this job is the gate" 1 "$action_rc"
+expect_eq "verdict" unknown "$(out verdict)"
+expect "the error says there is no verdict" log_has "has no verdict (status unknown)"
+expect "the result names the difference" jq -e '.policy.differs and (.unknown[0].what | startswith("differs from"))' "$(out payload-file)"
+
+begin "push behind the target tip: the tip's policy judges the pushed commit"
+on_push "$c1"
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "head and merge base are the pushed commit, the target is the tip" "$c1 $c1 $c2" \
+	"$(envelope_field head_sha) $(envelope_field merge_base_sha) $(envelope_field target_sha)"
+expect "the tip's policy is passed" check_args "$target_args"
+expect_eq "it is the tip's blob" "$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r .policy)"
+
+begin "merge group: the group commit, judged by the default branch's policy"
+on_merge_group "$gc" "$c2"
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "analyzed_sha is the run's merge commit" "$m2 merged" "$(envelope_field analyzed_sha) $(envelope_field integration)"
+cp "$(out envelope-file)" "$tmp/merge_group.envelope"
+expect_eq "the checkout is the group commit" "$gc" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+expect_eq "event, pull request, head" "merge_group 0 $gc" \
+	"$(envelope_field event) $(envelope_field pull_request) $(envelope_field head_sha)"
+expect_eq "target and merge base are the queue's base, the default branch tip" "refs/heads/main $c2 $c2" \
+	"$(envelope_field target_ref) $(envelope_field target_sha) $(envelope_field merge_base_sha)"
+expect "the default branch's policy is passed" check_args "$target_args"
+# The group commit holds the tip's policy unchanged, checked out with CRLF line ends.
+expect "the checkout's policy is the CRLF working-tree file (fixture sanity)" grep -q $'\r' "$GITHUB_WORKSPACE/.archfit.yaml"
+expect "the judged bytes are the tip's blob, not the working tree's" \
+	test "$(sha_of "$GITHUB_WORKSPACE/.archfit.yaml")" != "$(engine_call check | jq -r .policy)"
+expect_eq "they are the tip's blob" "$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r .policy)"
+expect "the summary names the group commit" summary_has "merge group commit \`$gc\` on base \`$c2\`"
 
-begin "event with a stale merge_commit_sha: the payload field is not trusted"
-on_pull_request "$f1" "$c2" acme/shop "$m2"
-jq --arg s "$c1" '.pull_request.merge_commit_sha = $s' "$GITHUB_EVENT_PATH" >"$case_dir/stale.json"
-export GITHUB_EVENT_PATH=$case_dir/stale.json
-start_app "[$ok_answer]"
+begin "merge group that edits the policy: the engine compares it with the default branch's"
+on_merge_group "$ge" "$c2"
+export FAKE_RESULT=$results/policy-differs.json
+start_app '[{"status": 200, "body": {"status": "unknown", "reason": "policy_not_target"}}]'
 run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "analyzed_sha is the run's merge commit" "$m2" "$(envelope_field analyzed_sha)"
+expect_eq "the action succeeds: the App's check carries the status" 0 "$action_rc"
+expect "no --policy" check_args "$checkout_args"
+expect_eq "the unknown result is uploaded" 1 "$(requests upload)"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
 
-begin "pull_request run whose ref is not a merge ref: refused before the checkout"
-on_pull_request "$f1" "$c2" acme/shop "$m2"
-export GITHUB_REF=refs/heads/feature
-start_app "[$ok_answer]"
+# --- A change that edits the policy: unknown, never judged by its own policy -----------
+
+begin "pull request that edits the policy: no --policy, the engine's unknown is uploaded"
+on_pull_request "$e1" "$c2"
+export FAKE_RESULT=$results/policy-differs.json
+start_app '[{"status": 200, "body": {"status": "unknown", "reason": "policy_not_target"}}]'
+run_action "$origin"
+expect_eq "the action succeeds: the App's check carries the status" 0 "$action_rc"
+expect "the engine compares the checkout's policy with the target's" check_args "$checkout_args"
+expect "no policy copy is mounted" json_ok '[.options[] | select(contains("/archfit/policy"))] == []' "$(engine_call check)"
+expect_eq "verdict" unknown "$(out verdict)"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "policy_digest is the digest the result names" \
+	"$(jq -r .policy.digest "$(out payload-file)")" "$(envelope_field policy_digest)"
+expect "the log shows the App's answer" log_has "status unknown, reason policy_not_target"
+expect "the step summary says the change edits the policy" summary_has "the change edits it, so the engine compares it with the target's"
+
+begin "pull request that edits the policy, without an App: the job fails"
+on_pull_request "$e1" "$c2"
+export FAKE_RESULT=$results/policy-differs.json
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error says there is no merge commit" log_has "has no merge commit to analyse"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+expect "the error says there is no verdict" log_has "has no verdict (status unknown)"
+expect "the envelope is still written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+
+begin "pull request that deletes the policy: unknown without invoking the legacy checker"
+on_pull_request "$d1" "$c2"
+export FAKE_RESULT=none FAKE_CHECK_RC=3
+start_app '[{"status": 200, "body": {"status": "unknown"}}]'
+run_action "$origin"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect_eq "no engine container runs" 0 "$(engine_calls)"
+expect_eq "verdict" unknown "$(out verdict)"
+expect_eq "the result is uploaded" 1 "$(requests upload)"
+expect "the result names the missing policy at the analysed commit" jq -e \
+	'.status == "unknown" and .unknown[0].cause == "policy" and
+	 .unknown[0].what == "the policy is missing at the analysed commit"' "$(out payload-file)"
+expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "the envelope names the target policy bytes" "sha256:$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(envelope_field policy_digest)"
+expect_eq "the result names the checked commit and merge base" "$d1 $c1" \
+	"$(jq -r '"\(.head) \(.base)"' "$(out payload-file)")"
+
+begin "policy deletion without an App is still an unknown gate failure"
+on_pull_request "$d1" "$c2"
+export FAKE_RESULT=none FAKE_CHECK_RC=3
+run_action "$origin"
+expect_eq "the action fails closed" 1 "$action_rc"
+expect_eq "no engine container runs" 0 "$(engine_calls)"
+expect "the job explains the unknown verdict, not an engine crash" log_has "has no verdict (status unknown)"
+
+begin "checkout-provided facts cannot hide a denied dependency or receive engine writes"
+on_pull_request "$deny1" "$c2"
+export FAKE_RESULT=$results/fail.json FAKE_CACHE_PROBE=1
+action_rc=0
+{
+	bash "$root/scripts/prepare.sh" &&
+		checkout "$origin" "$(out ref)" &&
+		mkdir -p "$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts" &&
+		printf '{"facts":{"imports":[]}}\n' >"$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts/poisoned.json" &&
+		ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) bash "$root/scripts/run.sh" &&
+		ARCHFIT_FACTS=$(out facts-file) bash "$root/scripts/report.sh"
+} >"$case_dir/log" 2>&1 || action_rc=$?
+expect_eq "the denied dependency still fails" 1 "$action_rc"
+expect_eq "verdict" fail "$(out verdict)"
+cache_mount=$(engine_call check | jq -r '[.options[] | select(endswith(":/src/.archfit-cache:rw"))][0]')
+cache_host=${cache_mount%:/src/.archfit-cache:rw}
+expect "the engine writes its cache outside the checkout" test -f "$cache_host/engine-write"
+expect_eq "the checkout cache has only the planted file" 1 "$(find "$GITHUB_WORKSPACE/.archfit-cache" -type f | wc -l | tr -d ' ')"
+expect_eq "the planted file is unchanged" '{"facts":{"imports":[]}}' "$(<"$GITHUB_WORKSPACE/.archfit-cache/facts/checkfacts/poisoned.json")"
+expect "the result contains the denied dependency" jq -e '[.errors[].rule] | index("no-a-to-c") != null' "$(out payload-file)"
+
+# --- A re-run reads the target tip as it is then (design 10.5) -----------------------
+
+begin "re-run after a policy-only commit on the target: the new tip's policy judges the same head"
+rerun_origin=$case_dir/rerun-origin
+git clone --quiet --bare "$origin" "$rerun_origin"
+on_pull_request "$f1" "$c2"
+start_app "[$ok_answer, $ok_answer]"
+run_action "$rerun_origin"
+expect_eq "the first attempt succeeds" 0 "$action_rc"
+expect_eq "the first attempt reads c2" "$c2" "$(envelope_field target_sha)"
+# An owner's answer lands on main: a policy-only commit, after the event was sent.
+work_clone=$case_dir/answer
+git clone --quiet "$rerun_origin" "$work_clone"
+replace "$work_clone/.archfit.yaml" "volatility: high" "volatility: medium"
+commit_all "$work_clone" "main: the owner's answer"
+git -C "$work_clone" push --quiet origin main
+c3=$(git -C "$work_clone" rev-parse HEAD)
+# GitHub re-runs replay the original event payload; the job checks out and fetches anew.
+rm -rf "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+mkdir -p "$RUNNER_TEMP"
+: >"$GITHUB_OUTPUT"
+: >"$FAKE_DOCKER_LOG"
+export GITHUB_RUN_ATTEMPT=2
+run_action "$rerun_origin"
+expect_eq "the re-run succeeds" 0 "$action_rc"
+expect "the re-run's envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+cp "$(out envelope-file)" "$tmp/rerun.envelope"
+expect_eq "run_attempt" 2 "$(envelope_field run_attempt)"
+expect_eq "head_sha is unchanged" "$f1" "$(envelope_field head_sha)"
+expect_eq "target_sha is the new tip, not the event's base" "$c3" "$(envelope_field target_sha)"
+expect_eq "the engine judges with the new tip's policy" \
+	"$(blob_sha256 "$rerun_origin" "$c3:.archfit.yaml")" "$(engine_call check | jq -r .policy)"
+expect "the new tip's policy differs from the old (fixture sanity)" \
+	test "$(blob_sha256 "$rerun_origin" "$c3:.archfit.yaml")" != "$(blob_sha256 "$rerun_origin" "$c2:.archfit.yaml")"
+expect_eq "two uploads" 2 "$(requests upload)"
+
+# --- The target ref is unambiguous ----------------------------------------------------
+
+begin "a tag named origin/main does not change the target"
+tagged=$case_dir/tagged
+git clone --quiet --bare "$origin" "$tagged"
+git -C "$tagged" tag origin/main "$e1"
+on_pull_request "$f1" "$c2"
+start_app "[$ok_answer]"
+run_action "$tagged"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the tag reached the checkout (fixture sanity)" \
+	test "$(git -C "$GITHUB_WORKSPACE" rev-parse origin/main 2>/dev/null)" == "$e1"
+expect_eq "target_sha is the branch tip" "$c2" "$(envelope_field target_sha)"
+expect "the engine gets the full remote-tracking ref" check_args "$target_args"
+expect_eq "the policy is the branch tip's" "$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r .policy)"
+
+begin "pull request into a branch that was not fetched: refused"
+on_pull_request "$f1" "$c2"
+jq '.pull_request.base.ref = "release"' "$GITHUB_EVENT_PATH" >"$case_dir/release.json"
+export GITHUB_EVENT_PATH=$case_dir/release.json
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the branch" log_has "the target branch release was not fetched"
 expect_eq "no engine run" 0 "$(engine_calls)"
 
-begin "merge commit of another base: refused, nothing analysed"
-# The event names c1 as the base, but m2 merges c2: its inputs and origin would not match.
-on_pull_request "$f1" "$c1" acme/shop "$m2"
-start_app "[$ok_answer]"
-run_action "$origin"
+begin "criss-cross pull request with two merge bases: refused"
+on_pull_request "$x2" "$(git -C "$cross" rev-parse y)"
+jq '.pull_request.base.ref = "y"' "$GITHUB_EVENT_PATH" >"$case_dir/cross.json"
+export GITHUB_EVENT_PATH=$case_dir/cross.json
+run_action "$cross"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the parents" log_has "does not merge the event's base $c1 and head $f1"
+expect "the error explains the merge bases" log_has "more than one merge base"
+expect_eq "no engine run" 0 "$(engine_calls)"
+
+# --- No policy to check with ----------------------------------------------------------
+
+begin "no policy on the target and none in the change: nothing checked, nothing sent"
+on_push "$np"
+start_app "[$ok_answer]"
+run_action "$no_policy"
+expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "no engine run" 0 "$(engine_calls)"
 expect_eq "no upload" 0 "$(requests upload)"
+expect "the notice names archfit init" log_has "Run archfit init"
+expect_eq "no payload" "" "$(out payload-file)"
 
-begin "merge commit that is not a merge: refused"
-on_pull_request "$f1" "$c1" acme/shop "$f1"
+begin "the first policy in a pull request: checked with it, the App decides"
+on_pull_request "$p1" "$np"
 start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the parents" log_has "does not merge the event's base"
-expect_eq "no engine run" 0 "$(engine_calls)"
+run_action "$no_policy"
+expect_eq "the action succeeds" 0 "$action_rc"
+expect "the engine reads the checkout's policy" check_args "$checkout_args"
+expect_eq "the result is uploaded" 1 "$(requests upload)"
 
 # --- Events the App does not accept: refused before the checkout ----------------------
 
-for refused in workflow_run pull_request_target; do
+for refused in workflow_run pull_request_target workflow_dispatch; do
 	begin "$refused is refused before the checkout"
 	on_unsupported "$refused" "$f1" "$c2"
 	start_app "[$ok_answer]"
@@ -440,82 +494,31 @@ for refused in workflow_run pull_request_target; do
 	expect_eq "no token requested" 0 "$(requests token)"
 done
 
-# --- Merge groups: the group commit the event names, inputs from its immutable base -----
-
-begin "code-only merge group: the group commit is analysed, every input read at the group commit"
-on_merge_group "$gc" "$c2"
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the checkout is the group commit" "$gc" "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-expect_eq "head_sha is the group commit" "$gc" "$(envelope_field head_sha)"
-expect_eq "analyzed_sha is the group commit, never a pull request head" "$gc" "$(envelope_field analyzed_sha)"
-expect_eq "no base, merge base, integration or pull request: the App resolves the members" \
-	'0||| ' "$(jq -r '"\(.pull_request)|\(.base_sha)|\(.merge_base_sha)|\(.integration) "' "$(out envelope-file)")"
-expect_eq "event" merge_group "$(envelope_field event)"
-expect "no policy classification" jq -e 'has("policy_change") | not' "$(out envelope-file)"
-expect_eq "every input read at the group commit" "group:$gc group:$gc group:$gc" \
-	"$(jq -r '[.inputs[] | "\(.from):\(.commit)"] | join(" ")' "$(out facts-file)")"
-expect_eq "baseline_digest is the group commit's blob" \
-	"$(blob_sha256 "$origin" "$gc:.archfit-baseline.json")" "$(envelope_field baseline_digest)"
-expect_eq "labels_digest is the group commit's blob" \
-	"$(blob_sha256 "$origin" "$gc:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
-expect_eq "origin compares with the base" "$c2" "$(check_calls | jq -r '.[0].args | .[index("--base") + 1]')"
-expect "the envelope is valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "one upload" 1 "$(requests upload)"
-expect "the summary names the group commit" summary_has "merge group commit \`$gc\` on base \`$c2\`"
-
-begin "merge group of two pull requests, one changing the policy: every input is the group commit's blob"
-on_merge_group "$g2" "$c2"
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "analyzed_sha is the group commit" "$g2" "$(envelope_field analyzed_sha)"
-expect_eq "the policy the group changes comes from the group commit" \
-	"$(blob_sha256 "$origin" "$g2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
-expect_eq "every input read at the group commit" "$g2 $g2 $g2" "$(jq -r '[.inputs[].commit] | join(" ")' "$(out facts-file)")"
-expect "no policy classification for a group" jq -e 'has("policy_change") | not' "$(out envelope-file)"
-expect_eq "nothing classified" 0 "$(compare_calls)"
-expect "the envelope is valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-
-begin "analyze-only merge group that changes the policy: the base policy gates it"
-on_merge_group "$g2" "$c2"
-run_action "$origin"
-expect_eq "the blocked verdict fails the job" 1 "$action_rc"
-expect_eq "the policy comes from the base, not the group" \
-	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
-expect_eq "every input read at the event's base" "base:$c2 base:$c2 base:$c2" \
-	"$(jq -r '[.inputs[] | "\(.from):\(.commit)"] | join(" ")' "$(out facts-file)")"
-expect "the log says the queued policy change is not measured" log_has "this merge group changes .archfit.yaml; without an App endpoint the base's copy is measured"
-
-begin "analyze-only merge group that deletes the policy: failure"
-on_merge_group "$gd" "$c2"
+begin "a tag push is refused before the checkout"
+on_push "$c2" refs/tags/v1.0.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error says the merge group deletes the policy" log_has "this merge group deletes .archfit.yaml"
-expect_eq "no engine run" 0 "$(engine_calls)"
+expect "the error says a tag has no target branch" log_has "not a branch; archfit checks pushes to branches only"
+expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-begin "merge group the App no longer queues (409 stale_group): final, no retry"
-on_merge_group "$gc" "$c2"
-start_app '[{"status":409,"body":{"error":"stale_group"}}]'
-run_action "$origin"
-expect_eq "the action succeeds: the App owns the group's check" 0 "$action_rc"
-expect_eq "one upload, no retry" 1 "$(requests upload)"
-expect "the notice names the code" log_has "the App answered 409 stale_group"
+for removed in discovery baseline reanchor; do
+	begin "mode $removed is refused before the checkout"
+	on_push "$c2"
+	export ARCHFIT_MODE=$removed
+	run_action "$origin"
+	expect_eq "the action fails" 1 "$action_rc"
+	expect "the error says Action 4 only checks" log_has "mode '$removed' is not supported"
+	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+done
 
-begin "merge group upload the App cannot decide yet (503): retried"
-on_merge_group "$gc" "$c2"
-start_app "[{\"status\":503,\"body\":{\"error\":\"unavailable\"}},$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "two uploads" 2 "$(requests upload)"
+# --- Merge groups: the group commit the event names, tied to the queue's base ----------
 
 for mismatch in sha ref; do
 	begin "merge group whose job context is not the event's group ($mismatch): refused before the checkout"
 	on_merge_group "$gc" "$c2"
 	case $mismatch in
-	sha) export GITHUB_SHA=$g2 ;;
-	ref) export GITHUB_REF=refs/heads/gh-readonly-queue/main/pr-7-$g2 ;;
+	sha) export GITHUB_SHA=$ge ;;
+	ref) export GITHUB_REF=refs/heads/gh-readonly-queue/main/pr-7-$ge ;;
 	esac
 	start_app "[$ok_answer]"
 	run_action "$origin"
@@ -539,28 +542,21 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error names the default branch" log_has "merge queue of the default branch (main) only"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-begin "merge group run in baseline mode: refused"
-on_merge_group "$gc" "$c2"
-export ARCHFIT_MODE=baseline
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error says merge groups only report" log_has "a merge_group run only reports"
-
 begin "merge group not built on the event's base: refused before the engine"
-on_merge_group "$gc" "$f1"
+on_merge_group "$gc" "$e1"
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the base" log_has "is not built on the event's base $f1"
+expect "the error names the base" log_has "is not built on the event's base $e1"
 expect_eq "no engine run" 0 "$(engine_calls)"
 expect_eq "no token requested" 0 "$(requests token)"
 
-begin "merge group whose base is not in the protected branch's history: refused"
-on_merge_group "$m2" "$f1"
+begin "merge group whose base is not in the default branch's history: refused"
+on_merge_group "$ge" "$e1"
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the branch" log_has "base $f1 is not in the history of main"
+expect "the error names the branch" log_has "base $e1 is not in the history of main"
 expect_eq "no engine run" 0 "$(engine_calls)"
 
 begin "merge group whose base is not fetched: refused"
@@ -569,172 +565,111 @@ run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error names the commit" log_has "base commit 0123456789abcdef0123456789abcdef01234567 is not in the fetched history"
 
-# --- Analyze-only pull requests: no owner approval, so every input from the base tip --
-
-begin "analyze-only pull request: the base policy gates the pull request"
-on_pull_request "$f1" "$c1"
+begin "merge group the App no longer queues (409 stale_group): final, no retry"
+on_merge_group "$gc" "$c2"
+start_app '[{"status":409,"body":{"error":"stale_group"}}]'
 run_action "$origin"
-expect_eq "the blocked verdict fails the job" 1 "$action_rc"
-expect_eq "the policy the pull request changes comes from the base tip, not its head" \
-	"$(blob_sha256 "$origin" "$c2:.archfit.yaml")" "$(engine_call check | jq -r '.bundle[".archfit.yaml"]')"
-expect_eq "every input is recorded as base" "base base base" "$(jq -r '[.inputs[].from] | join(" ")' "$(out facts-file)")"
-expect "the envelope is still valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "the action succeeds: the App owns the group's check" 0 "$action_rc"
+expect_eq "one upload, no retry" 1 "$(requests upload)"
+expect "the notice names the code" log_has "the App answered 409 stale_group"
 
-begin "analyze-only pull request that deletes the policy: failure"
-on_pull_request "$d1" "$c1"
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error says the pull request deletes the policy" log_has "this pull request deletes .archfit.yaml"
-expect_eq "no engine run" 0 "$(engine_calls)"
+# --- Without an App: the job is the gate -----------------------------------------------
 
-begin "reported pull request that deletes the policy: nothing measured, the notice names the head"
-on_pull_request "$d1" "$c1"
-start_app "[$ok_answer]"
+begin "no endpoint, pass: the job passes, nothing is sent"
+on_pull_request "$f1" "$c2"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
-expect "the notice names the commit the policy was read from" log_has "no .archfit.yaml at $d1"
+expect "the envelope is written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect "the notice says nothing was sent" log_has "no endpoint: nothing was sent"
+
+begin "no endpoint, fail: the job fails"
+on_pull_request "$f1" "$c2"
+export FAKE_RESULT=$results/fail.json
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect_eq "verdict" fail "$(out verdict)"
+expect "the error points at the artifact" log_has "the archfit-result artifact lists the errors"
+
+# --- The result: one engine pass, its exit code and status agree ------------------------
+
+begin "fail with an endpoint: uploaded, the job passes"
+on_pull_request "$f1" "$c2"
+export FAKE_RESULT=$results/fail.json
+start_app '[{"status": 200, "body": {"status": "fail"}}]'
+run_action "$origin"
+expect_eq "the action succeeds: the App's check carries the status" 0 "$action_rc"
+expect_eq "verdict" fail "$(out verdict)"
+expect "the step summary gives the App's status" summary_has "accepted the result (200): status fail"
+
+begin "exit code and status disagree: refused, nothing sent"
+on_pull_request "$f1" "$c2"
+export FAKE_RESULT=$results/fail.json FAKE_CHECK_RC=0
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names both" log_has "archfit exited 0, but its result says fail"
 expect_eq "no upload" 0 "$(requests upload)"
 
-begin "criss-cross pull request with two merge bases: refused"
-on_pull_request "$x2" "$y2"
-start_app "[$ok_answer]"
-run_action "$cross"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error explains the merge bases" log_has "more than one merge base"
-expect_eq "no engine run" 0 "$(engine_calls)"
-
-# --- Origin against the merge base: report-only, never a reason to fail -------------
-
-for base_rc in 3 137; do
-	begin "pull request whose base comparison exits $base_rc: reported again without origin"
-	on_pull_request "$f1" "$c1"
-	export FAKE_BASE_RC=$base_rc
-	start_app "[$ok_answer]"
-	run_action "$origin"
-	expect_eq "the action succeeds" 0 "$action_rc"
-	calls=$(check_calls)
-	expect "both origin and fallback request fresh evidence" json_ok 'all(.[]; .args | index("--refresh") != null)' "$calls"
-	expect "the check ran with --base, then again without it" json_ok \
-		'length == 2 and (.[0].args | index("--base")) != null and (.[1].args | index("--base")) == null
-		 and ([.[1].options[] | select(contains("worktrees"))] == [])' "$calls"
-	expect "the log says origin is missing for this run" log_has "origin is missing for this run"
-	expect "the log shows the engine's reason" log_has "git worktree add exited 128"
-	expect "the payload has no origin" jq -e '.comparison | has("origin_status") | not' "$(out payload-file)"
-	expect "the step summary says origin is missing" summary_has "Origin against the base: missing"
-	expect "the left-over worktree is removed from the checkout" test ! -e "$GITHUB_WORKSPACE/.archfit-cache"
-	expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-	expect_eq "the report is uploaded" 1 "$(requests upload)"
-done
-
-begin "failed base comparison without a protected baseline: the rerun cannot read one the first run planted"
-# cross/main has a policy and no baseline, so /bundle/.archfit-baseline.json is writable.
-on_pull_request "$(git -C "$cross" rev-parse x~1)" "$cm"
-export FAKE_BASE_RC=3 FAKE_BASE_LOCKED=true # the plant, then /bundle made undeletable
-start_app "[$ok_answer]"
-run_action "$cross"
-chmod -R u+w "$RUNNER_TEMP"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the first run had no baseline mounted, so the path was writable" json_ok \
-	'(.[0].args | index("--base")) != null and (.[0].bundle | keys) == [".archfit.yaml"]' "$(check_calls)"
-expect "the rerun starts from an empty bundle" json_ok '.[1].bundle | keys == [".archfit.yaml"]' "$(check_calls)"
-expect_eq "no baseline digest" "" "$(envelope_field baseline_digest)"
-
-begin "base comparison that leaves an unwritable directory: a warning, not a failure"
-on_pull_request "$f1" "$c1"
-export FAKE_BASE_LOCKED=true
-start_app "[$ok_answer]"
-run_action "$origin"
-chmod -R u+w "$GITHUB_WORKSPACE/.archfit-cache" 2>/dev/null
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the log says what was left" log_has "could not remove all of .archfit-cache/worktrees"
-expect_eq "the report is uploaded" 1 "$(requests upload)"
-
-begin "pull request whose engine fails with and without --base: failure, nothing sent"
-on_pull_request "$f1" "$c1"
-export FAKE_CHECK_RC=3
+begin "status waiting is the App's, never the engine's: refused"
+on_pull_request "$f1" "$c2"
+# Deliberately contradictory negative input, not an engine capture.
+jq '.status = "waiting"' "$results/fail.json" >"$case_dir/waiting.json"
+export FAKE_RESULT=$case_dir/waiting.json FAKE_CHECK_RC=1
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect_eq "the check ran twice" 2 "$(check_calls | jq length)"
-expect "the error is the engine's" log_has "archfit exited 3: no report was produced"
+expect "the error names the status" log_has "no status the engine gives ('waiting')"
 expect_eq "no upload" 0 "$(requests upload)"
 
-begin "base comparison that links .archfit-cache out of the checkout: the link is not followed"
-on_pull_request "$f1" "$c1"
-outside=$case_dir/outside
-mkdir -p "$outside/worktrees"
-: >"$outside/worktrees/keep"
-export FAKE_BASE_SYMLINK=$outside
+begin "exit 2 without a result: a tool error, the engine's reason in the log"
+on_pull_request "$f1" "$c2"
+export FAKE_RESULT=none
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error says no result was produced" log_has "archfit exited 2 without a result"
+expect "the error carries the engine's stderr" log_has "git add --all exited 128"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "the container fails (exit 125): failure, nothing sent"
+on_pull_request "$f1" "$c2"
+export FAKE_CHECK_RC=125
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the exit" log_has "the engine container exited 125"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "foreign schema: refused, nothing sent"
+on_pull_request "$f1" "$c2"
+printf '{"schema":"archfit.architecture-state.v1","status":"pass"}\n' >"$case_dir/foreign.json"
+export FAKE_RESULT=$case_dir/foreign.json FAKE_CHECK_RC=0
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the schema" log_has "declares schema 'archfit.architecture-state.v1'"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "a result without a policy digest: refused"
+on_pull_request "$f1" "$c2"
+jq 'del(.policy.digest)' "$results/pass.json" >"$case_dir/no-digest.json"
+export FAKE_RESULT=$case_dir/no-digest.json
+start_app "[$ok_answer]"
+run_action "$origin"
+expect_eq "the action fails" 1 "$action_rc"
+expect "the error names the digest" log_has "the result names no policy digest"
+expect_eq "no upload" 0 "$(requests upload)"
+
+begin "fork pull request: checked, nothing sent"
+on_pull_request "$f1" "$c2" someone/shop
 start_app "[$ok_answer]"
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
-expect "nothing behind the link is deleted" test -f "$outside/worktrees/keep"
-expect "the log says the directory was left" log_has "it is not a plain directory, so it is not removed"
-
-# --- The validator itself: it must reject what the App's decoder rejects --------------
-
-begin "the validator rejects envelopes the App's decoder or the header transport would reject"
-reference=$tmp/pull_request.envelope
-expect "the reference envelope is valid" valid_envelope "$reference" ""
-expect "the baseline reference envelope is valid" valid_envelope "$tmp/baseline.envelope" ""
-rejects() { # NAME: $case_dir/NAME.json must fail validation
-	if "$validator" "$schema" "$case_dir/$1.json" >/dev/null 2>&1; then fail "rejects $1"; else pass "rejects $1"; fi
-}
-mutate() { # NAME JQ-FILTER [REFERENCE]
-	jq -cj "$2" "${3:-$reference}" >"$case_dir/$1.json"
-	rejects "$1"
-}
-edit() { # NAME FROM TO: textual mutations jq cannot express
-	local text
-	text=$(<"$reference")
-	printf '%s' "${text/"$2"/"$3"}" >"$case_dir/$1.json"
-	rejects "$1"
-}
-mutate extra-key '. + {workflow_ref: "acme/shop/.github/workflows/archfit.yaml@refs/heads/main"}'
-mutate missing-key 'del(.labels_digest)'
-mutate null-kind '.kind = null'
-mutate unknown-kind '.kind = "snapshot"'
-mutate other-schema-version '.schema_version = "archfit.report-envelope.v2"'
-mutate string-run-id '.run_id |= tostring'
-mutate zero-attempt '.run_attempt = 0'
-mutate bare-payload-digest '.payload_digest |= ltrimstr("sha256:")'
-mutate prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)'
-mutate uppercase-head '.head_sha |= ascii_upcase'
-mutate platform-without-arch '.platform = "linux"'
-mutate push-with-pull-request '.event = "push" | .base_sha = "" | .merge_base_sha = ""'
-mutate pull-request-without-merge-base '.merge_base_sha = ""'
-mutate discovery-with-baseline '.kind = "discovery" | .baseline_digest = ("5b" * 32) | .labels_digest = ""'
-mutate baseline-with-baseline-digest '.baseline_digest = ("5b" * 32)' "$tmp/baseline.envelope"
-mutate baseline-with-pull-request '.pull_request = 42' "$tmp/baseline.envelope"
-mutate baseline-with-base-sha ".base_sha = \"$c1\"" "$tmp/baseline.envelope"
-mutate baseline-with-prefixed-labels-digest '.labels_digest = "sha256:" + .labels_digest' "$tmp/baseline.envelope"
-mutate missing-analyzed-sha 'del(.analyzed_sha)'
-mutate missing-integration 'del(.integration)'
-mutate empty-analyzed-sha '.analyzed_sha = ""'
-mutate short-analyzed-sha '.analyzed_sha |= .[0:39]'
-mutate uppercase-analyzed-sha '.analyzed_sha |= ascii_upcase'
-mutate unknown-integration '.integration = "rebased"'
-mutate pull-request-without-integration '.integration = ""'
-mutate baseline-with-integration '.integration = "merged"' "$tmp/baseline.envelope"
-mutate baseline-without-analyzed-sha '.analyzed_sha = ""' "$tmp/baseline.envelope"
-# A merge group states no base, merge base, integration, pull request or classification:
-# the App reads the group's members and inputs from GitHub.
-jq -cj '.event = "merge_group" | .pull_request = 0 | .base_sha = "" | .merge_base_sha = "" | .integration = "" | .analyzed_sha = .head_sha | del(.policy_change)' "$reference" >"$tmp/merge-group.envelope"
-expect "a merge group's envelope is valid" valid_envelope "$tmp/merge-group.envelope" ""
-mutate merge-group-with-base-sha ".base_sha = \"$c2\"" "$tmp/merge-group.envelope"
-mutate merge-group-with-merge-base ".merge_base_sha = \"$c2\"" "$tmp/merge-group.envelope"
-mutate merge-group-with-integration '.integration = "merged"' "$tmp/merge-group.envelope"
-mutate merge-group-with-pull-request '.pull_request = 42' "$tmp/merge-group.envelope"
-mutate merge-group-with-policy-change '. + {policy_change: {direction: "loosening", rules_removed: [], rules_loosened: [], waivers_added: [], allowlists_widened: [], coverage_lost: [], declarations_changed: [], rules_added: [], rules_tightened: [], waivers_removed: [], allowlists_narrowed: [], coverage_gained: []}}' "$tmp/merge-group.envelope"
-jq -cj '.integration = "conflicts" | .analyzed_sha = .head_sha' "$reference" >"$case_dir/conflicts.envelope"
-expect "a conflicting pull request's envelope is valid" valid_envelope "$case_dir/conflicts.envelope" ""
-edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
-edit fraction-attempt '"run_attempt":1,' '"run_attempt":1.0,'
-edit duplicate-key '"labels_digest"' "\"head_sha\":\"$f1\",\"labels_digest\""
-edit two-lines ',"event"' $',\n"event"'
-edit oversized '"}' "\"$(printf '%9000s' '')}"
-expect "rejects a payload the digest does not name" \
-	bash -c '! "$1" "$2" "$3=$4" >/dev/null 2>&1' _ "$validator" "$schema" "$reference" "$draft"
+expect_eq "no upload" 0 "$(requests upload)"
+expect_eq "no token requested" 0 "$(requests token)"
+expect "the notice explains forks" log_has "fork pull request"
+expect "the envelope is still written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
+expect_eq "the result is still kept" archfit-result "$(out artifact-name)"
 
 # --- Transport ------------------------------------------------------------------------
 
@@ -776,12 +711,12 @@ done
 
 begin "App strings are never echoed raw: no workflow command, no markdown"
 on_push "$c2"
-start_app '[{"status": 200, "body": {"conclusion": "success\n::error::injected", "reason": "[click](https://evil.example)"}}]'
+start_app '[{"status": 200, "body": {"status": "pass\n::error::injected", "reason": "[click](https://evil.example)"}}]'
 run_action "$origin"
 expect_eq "the action succeeds" 0 "$action_rc"
 expect "no injected workflow command in the log" bash -c '! grep -q "^::error::injected" "$1"' _ "$case_dir/log"
 expect "no injected link in the step summary" bash -c '! grep -q "evil.example" "$1"' _ "$GITHUB_STEP_SUMMARY"
-expect "the log says the values were unexpected" log_has "conclusion (unexpected value), reason (unexpected value)"
+expect "the log says the values were unexpected" log_has "status (unexpected value), reason (unexpected value)"
 
 begin "an unexpected error code is not echoed"
 on_push "$c2"
@@ -816,13 +751,13 @@ expect "the error names the App's code" log_has "HTTP 400 envelope_invalid"
 expect "the error gives the recovery" log_has "action commit the App pins"
 expect_eq "app-answer" '{"error":"envelope_invalid"}' "$(out app-answer)"
 
-begin "report 400 unsupported_event: the hint names the report events, not dispatch"
+begin "403 workflow_path: final, the hint names the fixed workflow"
 on_push "$c2"
-start_app '[{"status": 400, "body": {"error": "unsupported_event"}}]'
+start_app '[{"status": 403, "body": {"error": "workflow_path"}}]'
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the hint names the report events" log_has "Reports come from pull_request, push and default-branch merge_group runs"
-expect "the hint does not send a report to workflow_dispatch" bash -c '! grep -q "by workflow_dispatch" "$1"' _ "$case_dir/log"
+expect_eq "one upload" 1 "$(requests upload)"
+expect "the hint names the workflow file" log_has ".github/workflows/archfit.yaml as that workflow's own job"
 
 begin "404: final, endpoint hint"
 on_push "$c2"
@@ -840,14 +775,16 @@ expect_eq "the action fails" 1 "$action_rc"
 expect_eq "one upload" 1 "$(requests upload)"
 expect "the error names the proxy" log_has "A proxy changed the request method"
 
-begin "409 stale_head: superseded, not a failure"
-on_push "$c2"
-start_app '[{"status": 409, "body": {"error": "stale_head"}}]'
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "one upload" 1 "$(requests upload)"
-expect "the notice says the upload was superseded" log_has "supersedes this upload"
-expect_eq "app-status" 409 "$(out app-status)"
+for superseded in stale_run stale_head; do
+	begin "409 $superseded: superseded, not a failure"
+	on_push "$c2"
+	start_app "[{\"status\": 409, \"body\": {\"error\": \"$superseded\"}}]"
+	run_action "$origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "one upload" 1 "$(requests upload)"
+	expect "the notice says the upload was superseded" log_has "409 $superseded: a newer run, head or merge group supersedes this upload"
+	expect_eq "app-status" 409 "$(out app-status)"
+done
 
 begin "explicit audience"
 on_push "$c2"
@@ -858,61 +795,18 @@ expect_eq "the action succeeds" 0 "$action_rc"
 expect_eq "the token audience is the input, URL-encoded" \
 	"api-version=2.0&audience=https%3A%2F%2Farchfit.example" "$(token_query)"
 
-begin "payload over the App's 5 MiB cap: refused before sending"
+begin "result over the App's 5 MiB cap: refused before sending"
 on_push "$c2"
 start_app "[$ok_answer]"
-export FAKE_STATE=$case_dir/huge.json
 {
-	cat "$state_doc"
+	cat "$results/push-at-tip.json"
 	head -c 5300000 /dev/zero | tr '\0' ' '
-} >"$FAKE_STATE"
+} >"$case_dir/huge.json"
+export FAKE_RESULT=$case_dir/huge.json
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect_eq "no upload" 0 "$(requests upload)"
 expect "the error names the cap" log_has "accepts at most 5242880"
-
-# --- Edge cases -----------------------------------------------------------------------
-
-begin "fork pull request: analysed, nothing sent"
-on_pull_request "$f1" "$c1" someone/shop
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "no upload" 0 "$(requests upload)"
-expect_eq "no token requested" 0 "$(requests token)"
-expect "the notice explains forks" log_has "fork pull request"
-expect "the envelope is still written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "the report is still produced" archfit-report "$(out artifact-name)"
-
-begin "no policy on the protected ref: nothing measured, nothing sent"
-on_push "$np"
-start_app "[$ok_answer]"
-run_action "$no_policy"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "no engine run" 0 "$(engine_calls)"
-expect_eq "no upload" 0 "$(requests upload)"
-expect "the notice names discovery" log_has "mode: discovery"
-expect_eq "no payload" "" "$(out payload-file)"
-
-begin "engine exit 3: failure with the engine's reason, nothing sent"
-on_push "$c2"
-start_app "[$ok_answer]"
-export FAKE_CHECK_RC=3
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "no upload" 0 "$(requests upload)"
-expect "the error says no report was produced" log_has "no report was produced"
-expect "the error carries the engine's stderr" log_has "go list exited 1"
-
-begin "foreign schema_version: refused, nothing sent"
-on_push "$c2"
-start_app "[$ok_answer]"
-printf '{"schema_version":"something.else.v9","verdict":"healthy"}\n' >"$case_dir/foreign.json"
-export FAKE_STATE=$case_dir/foreign.json FAKE_CHECK_RC=0
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "no upload" 0 "$(requests upload)"
-expect "the error names the schema" log_has "something.else.v9"
 
 begin "endpoint without id-token permission"
 on_push "$c2"
@@ -923,72 +817,45 @@ expect_eq "the action fails" 1 "$action_rc"
 expect_eq "no upload" 0 "$(requests upload)"
 expect "the error names the permission" log_has "id-token: write"
 
-begin "no endpoint: analysis only; a blocked verdict fails the job"
-on_push "$c2"
-run_action "$origin"
-expect_eq "the action fails on blocked" 1 "$action_rc"
-expect "the envelope is written and valid" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect "the error says why" log_has "verdict is blocked"
+# --- Engine identity: the one engine this release pins --------------------------------
 
-begin "no endpoint: needs_attention cannot conceal failed hard gates"
-on_push "$c2"
-# Deliberately contradictory negative input, not a genuine optional-attention capture.
-jq '.verdict = "needs_attention"' "$state_doc" >"$case_dir/attention.json"
-export FAKE_STATE=$case_dir/attention.json
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "verdict" needs_attention "$(out verdict)"
-expect "the error names the unsatisfied local gate" log_has "hard gates did not pass"
-
-for unsupported in v3.0.1 v3.2.2 v3.2.3 v3.3.0 v3.4.1; do
+for unsupported in v3.4.0 v4.0.0 v4.0.0-rc.2; do
 	begin "engine $unsupported is refused before the checkout"
 	on_push "$c2"
 	export ARCHFIT_ENGINE_VERSION=$unsupported
 	run_action "$origin"
 	expect_eq "the action fails" 1 "$action_rc"
-	expect "the error names the one supported engine" log_has "this action runs engine v3.4.0 only"
+	expect "the error names the one supported engine" log_has "this action runs engine $ENGINE_VERSION only"
 	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 	expect_eq "no container ran" 0 "$(engine_calls)"
-
 done
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v3.4.0
+export ARCHFIT_IMAGE_DIGEST=v4.0.0-rc.1
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-# --- Engine inputs omitted: the engine this action release pins ---------------------
-
-readonly BAKED_ARM64=sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f
-readonly BAKED_AMD64=sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
-
-begin "engine-version and image-digest omitted on X64: the pinned engine and its amd64 digest"
-on_push "$c2"
-unset ARCHFIT_ENGINE_VERSION ARCHFIT_IMAGE_DIGEST
-export RUNNER_ARCH=X64 FAKE_PLATFORM=linux/amd64
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "prepare resolves the version" v3.4.0 "$(out engine-version)"
-expect_eq "prepare resolves the amd64 digest" "$BAKED_AMD64" "$(out image-digest)"
-expect_eq "the envelope names them" "v3.4.0 $BAKED_AMD64 linux/amd64" \
-	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
-expect "the image is pulled by that digest" json_ok \
-	'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$BAKED_AMD64"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-
-begin "engine-version and image-digest omitted on ARM64: the arm64 digest"
-on_push "$c2"
-unset ARCHFIT_ENGINE_VERSION ARCHFIT_IMAGE_DIGEST
-export RUNNER_ARCH=ARM64 FAKE_PLATFORM=linux/arm64
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the envelope names the arm64 digest" "v3.4.0 $BAKED_ARM64 linux/arm64" \
-	"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+for arch in X64 ARM64; do
+	begin "engine-version and image-digest omitted on $arch: the pinned engine and its digest"
+	on_push "$c2"
+	unset ARCHFIT_ENGINE_VERSION ARCHFIT_IMAGE_DIGEST
+	case $arch in
+	X64) platform=linux/amd64 pinned=$(lib_constant ENGINE_DIGEST_AMD64) ;;
+	ARM64) platform=linux/arm64 pinned=$(lib_constant ENGINE_DIGEST_ARM64) ;;
+	esac
+	export RUNNER_ARCH=$arch FAKE_PLATFORM=$platform
+	start_app "[$ok_answer]"
+	run_action "$origin"
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "prepare resolves the pinned engine" "$ENGINE_VERSION $pinned" "$(out engine-version) $(out image-digest)"
+	expect_eq "the envelope names them" "$ENGINE_VERSION $pinned $platform" \
+		"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+	expect "the image is pulled by that digest" json_ok \
+		'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$pinned"
+done
 
 begin "image-digest omitted on a runner without an engine image: refused before the checkout"
 on_push "$c2"
@@ -999,27 +866,21 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error names the architecture" log_has "runner architecture 'X86' has no engine image"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-begin "engine-version given and wrong, image-digest omitted: refused before the checkout"
+begin "an image of another engine version is refused before analysis"
 on_push "$c2"
-unset ARCHFIT_IMAGE_DIGEST
-export ARCHFIT_ENGINE_VERSION=v3.3.0
+export FAKE_ENGINE_VERSION=v3.4.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the one supported engine" log_has "this action runs engine v3.4.0 only"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+expect "the error names both versions" log_has "is engine v3.4.0, not $ENGINE_VERSION"
+expect_eq "only the version probe ran" 1 "$(engine_calls)"
 
-begin "image-digest given for another platform, engine-version omitted: refused before analysis"
+begin "an image for another platform than the runner is refused before any container"
 on_push "$c2"
-unset ARCHFIT_ENGINE_VERSION
-export ARCHFIT_IMAGE_DIGEST=$BAKED_ARM64 FAKE_PLATFORM=linux/arm64
+export FAKE_PLATFORM=linux/arm64
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error names both platforms" log_has "built for linux/arm64, but this runner is linux/amd64"
 expect_eq "no container ran" 0 "$(engine_calls)"
-
-begin "the baked digests are the per-platform digests this release pins"
-expect "lib.sh pins the amd64 digest" grep -qF "readonly ENGINE_DIGEST_AMD64=$BAKED_AMD64" "$root/scripts/lib.sh"
-expect "lib.sh pins the arm64 digest" grep -qF "readonly ENGINE_DIGEST_ARM64=$BAKED_ARM64" "$root/scripts/lib.sh"
 
 prepare_with_endpoint() { # ENDPOINT: run prepare.sh alone; sets action_rc
 	on_push "$c2"
@@ -1038,63 +899,9 @@ for endpoint in https://archfit.example https://archfit.example/app http://127.0
 	expect_eq "prepare succeeds" 0 "$action_rc"
 done
 
-for wrong_version in v3.2.3 v3.3.0; do
-	begin "an image of engine $wrong_version is refused before analysis"
-	on_push "$c2"
-	export FAKE_ENGINE_VERSION=$wrong_version
-	run_action "$origin"
-	expect_eq "the action fails" 1 "$action_rc"
-	expect "the error names both versions" log_has "is engine $wrong_version, not v3.4.0"
-	expect_eq "only the version probe ran" 1 "$(engine_calls)"
-done
+# --- No credentials reach the container ------------------------------------------------
 
-begin "an image for another platform than the runner is refused before any container"
-on_push "$c2"
-export FAKE_PLATFORM=linux/arm64
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names both platforms" log_has "built for linux/arm64, but this runner is linux/amd64"
-expect_eq "no container ran" 0 "$(engine_calls)"
-
-begin "an ARM64 runner takes the arm64 image"
-on_push "$c2"
-export FAKE_PLATFORM=linux/arm64 RUNNER_ARCH=ARM64
-start_app "[$ok_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "platform" linux/arm64 "$(envelope_field platform)"
-
-begin "a runner architecture without an engine image is refused"
-on_push "$c2"
-export RUNNER_ARCH=X86
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the architecture" log_has "runner architecture 'X86'"
-expect_eq "no container ran" 0 "$(engine_calls)"
-
-begin "a dispatched report is refused before any work"
-on_dispatch "$c2"
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the recovery" log_has "set mode: discovery"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
-
-begin "a dispatched baseline is allowed"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
-
-begin "discovery off the default branch is refused before any work"
-on_pull_request "$f1" "$c1"
-export ARCHFIT_MODE=discovery
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the default branch" log_has "default branch (main) only"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
-
-# with_git_config NAME FILE KEY VALUE: run the steps with KEY=VALUE planted in FILE
+# with_git_config NAME FILE KEY VALUE SHOWN: run the steps with KEY=VALUE planted in FILE
 # (relative to the checkout's .git) between the checkout and the engine run.
 with_git_config() {
 	begin "credentials never reach the engine container: $1"
@@ -1105,7 +912,7 @@ with_git_config() {
 		checkout "$origin" "$(out ref)"
 		mkdir -p "$(dirname "$GITHUB_WORKSPACE/.git/$2")"
 		git config --file "$GITHUB_WORKSPACE/.git/$2" "$3" "$4"
-		ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh"
+		ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) bash "$root/scripts/run.sh"
 	} >"$case_dir/log" 2>&1 || action_rc=$?
 	expect_eq "the action fails" 1 "$action_rc"
 	expect "the error names the file" log_has "keeps credentials in $5"
@@ -1125,484 +932,60 @@ action_rc=0
 	bash "$root/scripts/prepare.sh"
 	checkout "$origin" "$(out ref)"
 	git -C "$GITHUB_WORKSPACE" config remote.origin.url https://github.com/acme/shop
-	ARCHFIT_MODE=$(out mode) bash "$root/scripts/run.sh"
+	ARCHFIT_ENGINE_VERSION=$(out engine-version) ARCHFIT_IMAGE_DIGEST=$(out image-digest) bash "$root/scripts/run.sh"
 } >"$case_dir/log" 2>&1 || action_rc=$?
 expect_eq "the run succeeds" 0 "$action_rc"
 
-# --- Baseline capture -----------------------------------------------------------------
+# --- The validator itself: it must reject what the App's decoder rejects --------------
 
-begin "baseline without an endpoint: freshly captured, self-checked, kept as an artifact only"
-on_push "$c2"
-export ARCHFIT_MODE=baseline
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "capture runs with the protected policy and labels, never a stored baseline" json_ok \
-	'.args == ["baseline", "--refresh", "-c", "/bundle/.archfit.yaml", "--root", "/src"]
-	 and (.bundle | keys) == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
-expect "the self-check reads the captured baseline" json_ok '.bundle | has(".archfit-baseline.json")' "$(engine_call check)"
-expect_eq "the payload is the captured file" .archfit-baseline.json "$(basename "$(out payload-file)")"
-expect_eq "artifact name" archfit-baseline "$(out artifact-name)"
-expect_eq "no envelope: nothing is sent without an App" "" "$(out envelope-file)"
-expect_eq "no app-status" "" "$(out app-status)"
-expect "the notice says to commit the artifact" log_has "Commit the archfit-baseline artifact"
-expect "the engine's own output reaches the log, not only its stderr" log_has "baseline saved: /bundle/.archfit-baseline.json"
-
-begin "baseline equal to the protected one: unchanged, nothing written"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app '[{"status": 200, "body": {"unchanged": true}}]'
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "one upload" 1 "$(requests upload)"
-expect_eq "app-status" 200 "$(out app-status)"
-expect_eq "app-answer" '{"unchanged":true}' "$(out app-answer)"
-expect "the log says unchanged" log_has "unchanged: the capture equals the baseline on the default branch"
-expect "the step summary says nothing was written" summary_has "Nothing was written."
-expect "no pull request is named" bash -c '! grep -q "pull request #" "$1"' _ "$case_dir/log"
-
-for stale in stale_head stale_attempt; do
-	begin "baseline 409 $stale: not a success; dispatch the capture again"
-	on_dispatch "$c2"
-	export ARCHFIT_MODE=baseline
-	start_app "[{\"status\": 409, \"body\": {\"error\": \"$stale\"}}]"
-	run_action "$origin"
-	expect_eq "the action fails: no baseline pull request was opened" 1 "$action_rc"
-	expect_eq "one upload, no retry" 1 "$(requests upload)"
-	expect_eq "app-status" 409 "$(out app-status)"
-	expect "the error names the code" log_has "409 $stale"
-	expect "the error says to dispatch again" log_has "Dispatch the baseline capture again"
-	expect "it is not reported as superseded" bash -c '! grep -q "supersedes this upload" "$1"' _ "$case_dir/log"
-	expect "it is not reported as accepted" bash -c '! grep -q "accepted the baseline" "$1"' _ "$case_dir/log"
-	expect "the step summary says to dispatch again" summary_has "Dispatch the baseline capture again"
-done
-
-begin "baseline 503 with Retry-After: retried with a fresh token"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app '[{"status": 503, "headers": {"Retry-After": "3"}, "body": {"error": "unavailable"}}, '"$proposed_answer]"
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "two uploads" 2 "$(requests upload)"
-expect_eq "both to /v1/baselines" "/v1/baselines /v1/baselines" "$(upload_field 0 .path) $(upload_field 1 .path)"
-expect_eq "the retry carries the same envelope" "$(upload_field 0 .envelope)" "$(upload_field 1 .envelope)"
-expect_eq "the retry carries a fresh token" "Bearer oidc-2" "$(upload_field 1 .authorization)"
-expect_eq "waits Retry-After" 3 "$(<"$FAKE_SLEEP_LOG")"
-expect_eq "app-status is the final answer" 200 "$(out app-status)"
-expect "the step summary names the pull request" summary_has "baseline pull request #12"
-
-begin "baseline over the App's 1 MiB cap: refused before sending"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app "[$proposed_answer]"
-export FAKE_BASELINE
-FAKE_BASELINE=$(sized_baseline 1048577)
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "no token requested" 0 "$(requests token)"
-expect_eq "no upload" 0 "$(requests upload)"
-expect "the error names the size and the cap" log_has "the baseline payload is 1048577 bytes; the App accepts at most 1048576"
-expect_eq "the capture is still kept as an artifact" archfit-baseline "$(out artifact-name)"
-
-begin "baseline of exactly 1 MiB: sent"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app "[$proposed_answer]"
-export FAKE_BASELINE
-FAKE_BASELINE=$(sized_baseline 1048576)
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "one upload of 1048576 bytes" "1 1048576" "$(requests upload) $(upload_field 0 .body_bytes)"
-
-begin "baseline 413 baseline_too_large from the App: final"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app '[{"status": 413, "body": {"error": "baseline_too_large"}}]'
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "one upload" 1 "$(requests upload)"
-expect "the error names the App's code" log_has "HTTP 413 baseline_too_large"
-expect "the error explains the limit" log_has "exceeds the App's size limit"
-expect "the step summary names the code" summary_has "HTTP 413 baseline_too_large"
-
-for row in \
-	"403|labels_mismatch|dispatch the baseline capture again" \
-	"403|policy_mismatch|dispatch the baseline capture again" \
-	"403|unknown_engine_identity|image-digest the App's manifest lists" \
-	"403|workflow_not_approved|Run baseline from the workflow" \
-	"400|baseline_invalid|archfit.baseline.v3 baseline"; do
-	IFS='|' read -r status code says <<<"$row"
-	begin "baseline $status $code: final, with the recovery"
-	on_dispatch "$c2"
-	export ARCHFIT_MODE=baseline
-	start_app "[{\"status\": $status, \"body\": {\"error\": \"$code\"}}]"
-	run_action "$origin"
-	expect_eq "the action fails" 1 "$action_rc"
-	expect_eq "one upload" 1 "$(requests upload)"
-	expect "the error names the App's code" log_has "HTTP $status $code"
-	expect "the error gives the recovery" log_has "$says"
-	expect "the step summary names the code" summary_has "HTTP $status $code"
-done
-
-begin "baseline answers are never echoed raw: no workflow command, no markdown"
-on_dispatch "$c2"
-export ARCHFIT_MODE=baseline
-start_app '[{"status": 200, "body": {"unchanged": "true\n::error::injected", "pull_request": "12\n::error::injected", "url": "[click](https://evil.example)"}}]'
-run_action "$origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "no injected workflow command in the log" bash -c '! grep -q "^::error::injected" "$1"' _ "$case_dir/log"
-expect "no injected link in the step summary" bash -c '! grep -q "evil.example" "$1"' _ "$GITHUB_STEP_SUMMARY"
-expect "a string 'true' is not unchanged" bash -c '! grep -q "unchanged" "$1"' _ "$GITHUB_STEP_SUMMARY"
-expect "the log says the values were unexpected" log_has "baseline pull request #(unexpected value) (unexpected value)"
-
-begin "baseline that this image finds non-comparable: failure"
-on_push "$c2"
-export ARCHFIT_MODE=baseline FAKE_BASELINE_COMPARABLE=false
-run_action "$origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error says why" log_has "not comparable in this image"
-
-# --- Re-anchor -----------------------------------------------------------------------
-# The protected baseline is a v3 file the engine accepted once; the engine's re-anchor
-# (fixtures/) carries its accepted debt to the new file and prints what it kept and dropped.
-
-reanchor_origin=$tmp/reanchor-origin
-git init --quiet -b main "$reanchor_origin"
-write_module "$reanchor_origin"
-cp "$root/tests/fixtures/stored-baseline.json" "$reanchor_origin/.archfit-baseline.json"
-printf 'labels: []\n' >"$reanchor_origin/.archfit-labels.yaml"
-commit_all "$reanchor_origin" "code, policy, the protected baseline and labels"
-ra=$(git -C "$reanchor_origin" rev-parse HEAD)
-stored_digest=$(blob_sha256 "$reanchor_origin" "$ra:.archfit-baseline.json")
-reanchored=$root/tests/fixtures/reanchored-baseline.json
-
-no_baseline=$tmp/no-baseline
-git init --quiet -b main "$no_baseline"
-write_module "$no_baseline"
-printf 'labels: []\n' >"$no_baseline/.archfit-labels.yaml"
-commit_all "$no_baseline" "code and policy, no baseline"
-nb=$(git -C "$no_baseline" rev-parse HEAD)
-
-begin "reanchor: engine re-anchors from the protected file, one upload to /v1/reanchors"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor
-start_app "[$proposed_answer]"
-run_action "$reanchor_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-envelope=$(out envelope-file)
-expect "the envelope conforms to the App schema" valid_envelope "$envelope" "$(out payload-file)"
-cp "$envelope" "$tmp/reanchor.envelope"
-expect_eq "kind" reanchor "$(envelope_field kind)"
-expect_eq "route" /v1/reanchors "$(upload_field 0 .path)"
-expect_eq "one upload" 1 "$(requests upload)"
-expect_eq "the body is the new baseline file, byte for byte" "$(sha_of "$reanchored")" "$(upload_field 0 .body_sha256)"
-expect_eq "the payload is the new baseline file" "$(sha_of "$reanchored")" "$(sha_of "$(out payload-file)")"
-expect_eq "content type" application/json "$(upload_field 0 .content_type)"
-expect_eq "baseline_digest is the digest of the old protected blob" "$stored_digest" "$(envelope_field baseline_digest)"
-expect_eq "labels_digest is the labels blob's" "$(blob_sha256 "$reanchor_origin" "$ra:.archfit-labels.yaml")" "$(envelope_field labels_digest)"
-expect_eq "pull request, base and merge base are empty off pull requests" "0||" \
-	"$(envelope_field pull_request)|$(envelope_field base_sha)|$(envelope_field merge_base_sha)"
-expect_eq "head_sha is the default-branch commit" "$ra" "$(envelope_field head_sha)"
-expect_eq "app-answer is the proposal" '{"pull_request":12,"url":"https://github.com/acme/shop/pull/12"}' "$(out app-answer)"
-expect_eq "the engine re-anchors from the mounted protected file" \
-	'["baseline","--refresh","--reanchor","--from","/reference/.archfit-baseline.json","-c","/bundle/.archfit.yaml","--root","/src"]' \
-	"$(engine_call baseline | jq -c .args)"
-expect_eq "the protected file is mounted from the protected blob" "$stored_digest" "$(engine_call baseline | jq -r .reference)"
-expect "the protected file is mounted read-only, outside /bundle" json_ok \
-	'.options | any(. == "/reference/.archfit-baseline.json:/reference/.archfit-baseline.json:ro" or endswith(":/reference/.archfit-baseline.json:ro"))' \
-	"$(engine_call baseline)"
-expect "the engine reads no stored baseline from /bundle" json_ok \
-	'.bundle | keys == [".archfit-labels.yaml", ".archfit.yaml"]' "$(engine_call baseline)"
-expect "the self-check reads the new file, not the old one" json_ok \
-	".bundle[\".archfit-baseline.json\"] == \"$(sha_of "$reanchored")\"" "$(engine_call check)"
-expect "the engine's re-anchor report is the report file" cmp -s "$root/tests/fixtures/reanchor-report.txt" "$(out report-file)"
-expect "the report is in the log" log_has "re-anchor: kept 0 accepted entries, dropped 1"
-expect "the report is in the step summary" summary_has "dropped: no_direct_b_dependency stale0000000000"
-expect "the summary names the report" summary_has "Re-anchor report"
-
-begin "reanchor: the report is kept as an artifact even when the App refuses the upload"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor
-start_app '[{"status": 400, "body": {"error": "baseline_invalid"}}]'
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "the artifact is the baseline" archfit-baseline "$(out artifact-name)"
-expect "the report file exists" test -s "$(out report-file)"
-expect "action.yml uploads the report file with the baseline (the upload step does not run here)" \
-	grep -qF 'steps.run.outputs.report-file' "$root/action.yml"
-
-begin "reanchor without an endpoint: captured, self-checked, an artifact only"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor
-run_action "$reanchor_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "no envelope: nothing is sent without an App" "" "$(out envelope-file)"
-expect_eq "no upload attempted" "" "$(out app-status)"
-expect "the notice says re-anchored" log_has "re-anchored and comparable"
-
-begin "reanchor with no protected baseline: refused before the engine runs"
-on_dispatch "$nb"
-export ARCHFIT_MODE=reanchor
-run_action "$no_baseline"
-expect_eq "the action fails" 1 "$action_rc"
-expect_eq "no engine run" 0 "$(engine_calls)"
-expect "the error says there is no baseline" log_has "there is no baseline to re-anchor"
-expect "the error points to the first capture" log_has "mode: baseline"
-
-begin "reanchor off the default branch is refused before any work"
-on_pull_request "$ra" "$ra"
-export ARCHFIT_MODE=reanchor
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error names the default branch" log_has "default branch (main) only"
-expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
-
-begin "reanchor when the engine refuses the stored file (exit 3): failure with its reason, nothing sent"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor FAKE_REANCHOR_RC=3
-start_app "[$proposed_answer]"
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the engine's reason is in the log" log_has "cannot be re-anchored"
-expect_eq "no upload" 0 "$(requests upload)"
-expect_eq "no payload" "" "$(out payload-file)"
-
-begin "reanchor that this image finds non-comparable: failure"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor FAKE_BASELINE_COMPARABLE=false
-start_app "[$proposed_answer]"
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error says why" log_has "not comparable in this image"
-expect_eq "no upload" 0 "$(requests upload)"
-
-begin "reanchor 409 stale_head: not a success; dispatch the re-anchor again"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchor
-start_app '[{"status": 409, "body": {"error": "stale_head"}}]'
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error says to dispatch the re-anchor again" log_has "Dispatch the re-anchor again"
-expect "the step summary says to dispatch again" summary_has "Dispatch the re-anchor again"
-
-for row in \
-	"403|reanchor_digest_mismatch|dispatch the re-anchor again" \
-	"403|reanchor_baseline_missing|mode: baseline" \
-	"400|reanchor_not_subset|dispatch the re-anchor again"; do
-	IFS='|' read -r status code says <<<"$row"
-	begin "reanchor $status $code: final, with the recovery"
-	on_dispatch "$ra"
-	export ARCHFIT_MODE=reanchor
-	start_app "[{\"status\": $status, \"body\": {\"error\": \"$code\"}}]"
-	run_action "$reanchor_origin"
-	expect_eq "the action fails" 1 "$action_rc"
-	expect_eq "one upload" 1 "$(requests upload)"
-	expect "the error names the App's code" log_has "HTTP $status $code"
-	expect "the error gives the recovery" log_has "$says"
-done
-
-begin "reanchor: an unknown mode is refused with all four modes"
-on_dispatch "$ra"
-export ARCHFIT_MODE=reanchorr
-run_action "$reanchor_origin"
-expect_eq "the action fails" 1 "$action_rc"
-expect "the error lists the modes" log_has "mode must be report, discovery, baseline or reanchor"
-
-begin "the reanchor envelope with a missing or malformed baseline_digest is rejected"
-mutate reanchor-empty-baseline-digest '.baseline_digest = ""' "$tmp/reanchor.envelope"
-mutate reanchor-short-baseline-digest '.baseline_digest = ("5b" * 31)' "$tmp/reanchor.envelope"
-mutate reanchor-prefixed-baseline-digest '.baseline_digest = "sha256:" + ("5b" * 32)' "$tmp/reanchor.envelope"
-mutate reanchor-with-pull-request '.pull_request = 42' "$tmp/reanchor.envelope"
-mutate reanchor-with-base-sha ".base_sha = \"$ra\"" "$tmp/reanchor.envelope"
-
-# --- Policy change: the engine's classification of a proposed policy -----------------
-
-begin "policy-change fixtures are the engine's output, pinned by sha256"
-fixtures=$root/tests/fixtures/policy-change
-expect_eq "widen.json" 79a08107a657c97abb7f64127f9738321ff0b3f3578637c21bd818971f29a621 "$(sha_of "$fixtures/widen.json")"
-expect_eq "addrule.json" bb069ce1c27741fae5a259a3cc57202b841ffd1fc4dbed9029a971f9e87feabf "$(sha_of "$fixtures/addrule.json")"
-expect_eq "exclude.json" 91c51bce25d403a3d6495eb626c919f4d5aa3f10b6aae9031fee90af128a502e "$(sha_of "$fixtures/exclude.json")"
-
-policy_origin=$tmp/policy-origin
-git init --quiet -b main "$policy_origin"
-write_module "$policy_origin"
-cp "$fixtures/base-none.yaml" "$policy_origin/.archfit.yaml"
-commit_all "$policy_origin" "code and policy"
-pc_base=$(git -C "$policy_origin" rev-parse HEAD)
-policy_branch() { # NAME FILE: a branch from the base that replaces the policy with FILE (or deletes it)
-	git -C "$policy_origin" checkout --quiet -b "$1" "$pc_base"
-	if [[ $2 == - ]]; then git -C "$policy_origin" rm --quiet .archfit.yaml; else cp "$fixtures/$2" "$policy_origin/.archfit.yaml"; fi
-	commit_all "$policy_origin" "$1"
-	git -C "$policy_origin" rev-parse HEAD
-	git -C "$policy_origin" checkout --quiet main
+begin "the validator rejects envelopes the App's decoder or the header transport would reject"
+reference=$tmp/pull_request.envelope
+expect "the pull request envelope is valid" valid_envelope "$reference" ""
+expect "the push envelope is valid" valid_envelope "$tmp/push.envelope" ""
+expect "the merge group envelope is valid" valid_envelope "$tmp/merge_group.envelope" ""
+expect "the re-run envelope is valid" valid_envelope "$tmp/rerun.envelope" ""
+rejects() { # NAME: $case_dir/NAME.json must fail validation
+	if "$validator" "$schema" "$case_dir/$1.json" >/dev/null 2>&1; then fail "rejects $1"; else pass "rejects $1"; fi
 }
-pc_widen=$(policy_branch widen widen.candidate.yaml)
-pc_addrule=$(policy_branch addrule addrule.candidate.yaml)
-pc_exclude=$(policy_branch exclude exclude.candidate.yaml)
-git -C "$policy_origin" checkout --quiet -b code "$pc_base"
-printf '// reviewed\n' >>"$policy_origin/pkg/b/b.go"
-commit_all "$policy_origin" code
-pc_code=$(git -C "$policy_origin" rev-parse HEAD)
-git -C "$policy_origin" checkout --quiet main
-m_widen=$(merge_commit "$policy_origin" "$pc_base" "$pc_widen" merge-widen)
-m_addrule=$(merge_commit "$policy_origin" "$pc_base" "$pc_addrule" merge-addrule)
-m_exclude=$(merge_commit "$policy_origin" "$pc_base" "$pc_exclude" merge-exclude)
-m_code=$(merge_commit "$policy_origin" "$pc_base" "$pc_code" merge-code)
-
-# policy_mount TARGET prints the host file the engine call mounted at TARGET.
-policy_mount() { jq -r --arg t "$1" '.options | [range(length) as $i | select(.[$i] == "--volume") | .[$i + 1]]
-	| map(select(endswith(":" + $t + ":ro"))) | .[0] // "" | sub(":" + $t + ":ro$"; "")' <<<"$(engine_call config)"; }
-
-policy_change_of() { jq -c '.policy_change' "$1"; }
-
-begin "pull request that widens an allowlist: classified, archived and summarised"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-export FAKE_COMPARE=$fixtures/widen.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the report is still sent" 1 "$(requests upload)"
-expect "the engine compares the head policy against the base policy" json_ok \
-	'.args == ["config", "compare", "/candidate/.archfit.yaml", "-c", "/current/.archfit.yaml", "--root", "/src", "--json"]' \
-	"$(engine_call config)"
-expect_eq "the candidate is the head's policy" "$(blob_sha256 "$policy_origin" "$pc_widen:.archfit.yaml")" "$(sha_of "$(policy_mount /candidate)/.archfit.yaml")"
-expect_eq "the current is the base's policy" "$(blob_sha256 "$policy_origin" "$pc_base:.archfit.yaml")" "$(sha_of "$(policy_mount /current)/.archfit.yaml")"
-expect_eq "the artifact is the engine's document, byte for byte" "$(sha_of "$fixtures/widen.json")" "$(sha_of "$(out policy-change-file)")"
-expect "the step summary says what loosened" summary_has "Policy change: loosening: loosens 1, tightens 0, coverage lost 0"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "the envelope carries the engine's policy_change, unchanged" "$(jq -c .policy_change "$fixtures/widen.json")" "$(policy_change_of "$(out envelope-file)")"
-expect_eq "the header the App receives carries it" "$(jq -c .policy_change "$fixtures/widen.json")" "$(upload_field 0 .envelope | jq -c .policy_change)"
-expect_eq "the payload is the engine's report alone" "$(envelope_field payload_digest)" "sha256:$(upload_field 0 .body_sha256)"
-cp "$(out envelope-file)" "$tmp/policy-change.envelope"
-expect "the verdict is the head's alone" test "$(out verdict)" = blocked
-
-begin "pull request that adds a rule: tightening"
-on_pull_request "$pc_addrule" "$pc_base" acme/shop "$m_addrule"
-export FAKE_COMPARE=$fixtures/addrule.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the step summary says what tightened" summary_has "Policy change: tightening: loosens 0, tightens 1, coverage lost 0"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "the envelope carries the tightening" tightening "$(envelope_field policy_change.direction)"
-
-begin "pull request that excludes a source tree: coverage lost"
-on_pull_request "$pc_exclude" "$pc_base" acme/shop "$m_exclude"
-export FAKE_COMPARE=$fixtures/exclude.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the step summary counts the coverage lost" summary_has "Policy change: loosening: loosens 0, tightens 0, coverage lost 1"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-expect_eq "the envelope carries the coverage lost" exclude_added "$(envelope_field 'policy_change.coverage_lost[0].kind')"
-
-begin "engine output without the policy-change section: archived, reported as not classified"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-export FAKE_COMPARE=$fixtures/widen.json FAKE_COMPARE_NO_SECTION=true
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the step summary says the engine does not classify" summary_has "Policy change: not classified: engine v3.4.0 has no policy-change section"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-expect "the document is archived" test -s "$(out policy-change-file)"
-
-begin "the classification fails: a warning, the report is still sent"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-export FAKE_COMPARE_RC=3
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the warning names the exit" log_has "the policy change could not be classified (archfit exit 3)"
-expect "the engine's reason is in the log" log_has "decode failed"
-expect_eq "no policy-change artifact" "" "$(out policy-change-file)"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-expect_eq "the report is still sent" 1 "$(requests upload)"
-
-begin "pull request that leaves the policy unchanged: no classification"
-on_pull_request "$pc_code" "$pc_base" acme/shop "$m_code"
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
-expect_eq "no artifact" "" "$(out policy-change-file)"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-
-begin "pull request that changes no policy, while the base tip has tightened it since the branch: no classification"
-git -C "$policy_origin" checkout --quiet -b code-late "$pc_base"
-printf '// later\n' >>"$policy_origin/pkg/b/b.go"
-commit_all "$policy_origin" code-late
-pc_late=$(git -C "$policy_origin" rev-parse HEAD)
-git -C "$policy_origin" checkout --quiet main
-cp "$fixtures/addrule.candidate.yaml" "$policy_origin/.archfit.yaml"
-commit_all "$policy_origin" "main tightens the policy after the branch"
-pc_main=$(git -C "$policy_origin" rev-parse HEAD)
-m_late=$(merge_commit "$policy_origin" "$pc_main" "$pc_late" merge-late)
-on_pull_request "$pc_late" "$pc_main" acme/shop "$m_late"
-export FAKE_COMPARE=$fixtures/addrule.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
-expect "the step summary has no policy change" bash -c '! grep -q "Policy change" "$1"' _ "$GITHUB_STEP_SUMMARY"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-
-begin "analysis-only pull request that makes .archfit.yaml a gitlink: not classified, the job still succeeds"
-git -C "$policy_origin" checkout --quiet -b gitlink "$pc_base"
-git -C "$policy_origin" rm --quiet .archfit.yaml
-git -C "$policy_origin" update-index --add --cacheinfo "160000,$pc_base,.archfit.yaml"
-git -C "$policy_origin" -c user.name=test -c user.email=test@example.com commit --quiet -m gitlink
-pc_gitlink=$(git -C "$policy_origin" rev-parse HEAD)
-git -C "$policy_origin" checkout --quiet main
-on_pull_request "$pc_gitlink" "$pc_base" acme/shop
-run_action "$policy_origin"
-expect_eq "the job fails on the verdict (blocked), not on the classification" 1 "$action_rc"
-expect "the failure is the verdict's" log_has "the architecture verdict is blocked"
-expect "the step summary says the head's policy is not a regular file" summary_has "not classified: .archfit.yaml at the head is not a regular file"
-expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
-expect "the report is still produced" test "$(out artifact-name)" = archfit-report
-begin "policy change whose edit orders nothing (direction none): no policy_change in the envelope"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-jq '.policy_change |= (.direction = "none" | .allowlists_widened = [])' "$fixtures/widen.json" >"$case_dir/none.json"
-export FAKE_COMPARE=$case_dir/none.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-expect "the envelope conforms to the App schema" valid_envelope "$(out envelope-file)" "$(out payload-file)"
-
-begin "policy change too large for the envelope: sent without it, with a warning"
-on_pull_request "$pc_widen" "$pc_base" acme/shop "$m_widen"
-jq '.policy_change.allowlists_widened = [range(400) | {module: "module_\(.)", field: "depends_on", from: "none", to: "[b]"}]' \
-	"$fixtures/widen.json" >"$case_dir/huge.json"
-export FAKE_COMPARE=$case_dir/huge.json
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect "the warning says it did not fit" log_has "the policy-change classification does not fit in the envelope"
-expect_eq "the envelope has no policy_change" null "$(policy_change_of "$(out envelope-file)")"
-expect "the envelope is within the App's cap" test "$(wc -c <"$(out envelope-file)")" -le 8192
-expect_eq "the report is still sent" 1 "$(requests upload)"
-expect "the artifact keeps the whole document" test "$(jq '.policy_change.allowlists_widened | length' "$(out policy-change-file)")" = 400
-
-begin "the validator rejects policy_change where the App's decoder would"
-expect "a pull request envelope with policy_change is valid" valid_envelope "$tmp/policy-change.envelope" ""
-mutate policy-change-on-push '.event = "push" | .pull_request = 0 | .base_sha = "" | .merge_base_sha = "" | .integration = "" | .analyzed_sha = .head_sha' "$tmp/policy-change.envelope"
-mutate policy-change-on-baseline ". + {policy_change: $(jq -c .policy_change "$fixtures/widen.json")}" "$tmp/baseline.envelope"
-mutate policy-change-direction-none '.policy_change.direction = "none"' "$tmp/policy-change.envelope"
-mutate policy-change-unknown-direction '.policy_change.direction = "sideways"' "$tmp/policy-change.envelope"
-mutate policy-change-extra-key '.policy_change.score = 1' "$tmp/policy-change.envelope"
-mutate policy-change-missing-list 'del(.policy_change.coverage_lost)' "$tmp/policy-change.envelope"
-mutate policy-change-list-not-array '.policy_change.rules_removed = {}' "$tmp/policy-change.envelope"
-mutate policy-change-not-object '.policy_change = "loosening"' "$tmp/policy-change.envelope"
-
-begin "push: no classification, whatever the policy change"
-on_push "$pc_widen"
-start_app "[$ok_answer]"
-run_action "$policy_origin"
-expect_eq "the action succeeds" 0 "$action_rc"
-expect_eq "the engine is not asked to compare" 0 "$(compare_calls)"
-
-begin "no-endpoint report-stage required-evidence regressions"
-expect "genuine optional attention passes; required gaps and malformed decisions fail" \
-	bash "$root/tests/report-evidence.sh"
+mutate() { # NAME JQ-FILTER [REFERENCE]
+	jq -cj "$2" "${3:-$reference}" >"$case_dir/$1.json"
+	rejects "$1"
+}
+edit() { # NAME FROM TO: textual mutations jq cannot express
+	local text
+	text=$(<"$reference")
+	printf '%s' "${text/"$2"/"$3"}" >"$case_dir/$1.json"
+	rejects "$1"
+}
+mutate extra-key '. + {workflow_ref: "acme/shop/.github/workflows/archfit.yaml@refs/heads/main"}'
+mutate v1-kind '. + {kind: "report"}'
+mutate v1-baseline-digest '. + {baseline_digest: ""}'
+mutate v1-integration '. + {integration: "merged"}'
+mutate missing-target-sha 'del(.target_sha)'
+mutate missing-merge-base 'del(.merge_base_sha)'
+mutate missing-policy-digest 'del(.policy_digest)'
+mutate v1-schema-version '.schema_version = "archfit.report-envelope.v1"'
+mutate dispatch-event '.event = "workflow_dispatch" | .pull_request = 0'
+mutate string-run-id '.run_id |= tostring'
+mutate zero-attempt '.run_attempt = 0'
+mutate bare-payload-digest '.payload_digest |= ltrimstr("sha256:")'
+mutate bare-policy-digest '.policy_digest |= ltrimstr("sha256:")'
+mutate uppercase-head '.head_sha |= ascii_upcase'
+mutate short-target-sha '.target_sha |= .[0:39]'
+mutate target-ref-not-a-branch '.target_ref = "refs/tags/v1.0.0"'
+mutate short-target-ref '.target_ref = "main"'
+mutate platform-without-arch '.platform = "linux"'
+mutate pull-request-zero '.pull_request = 0'
+mutate push-with-pull-request '.event = "push"'
+mutate merge-group-with-pull-request '.pull_request = 42' "$tmp/merge_group.envelope"
+mutate null-target-sha '.target_sha = null'
+edit exponent-run-id '"run_id":17654321098' '"run_id":1.7654321098e10'
+edit fraction-attempt '"run_attempt":1,' '"run_attempt":1.0,'
+edit duplicate-key '"platform"' "\"head_sha\":\"$f1\",\"platform\""
+edit two-lines ',"event"' $',\n"event"'
+edit oversized '"}' "\"$(printf '%9000s' '')}"
+expect "rejects a payload the digest does not name" \
+	bash -c '! "$1" "$2" "$3=$4" >/dev/null 2>&1' _ "$validator" "$schema" "$reference" "$results/fail.json"
+expect "accepts the payload the digest names" valid_envelope "$reference" "$tmp/pull_request.result"
 
 finish

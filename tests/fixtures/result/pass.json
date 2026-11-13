@@ -1,0 +1,17 @@
+{
+  "schema": "archfit.result.v1",
+  "status": "pass",
+  "summary": "archfit: pass",
+  "errors": [],
+  "unknown": [],
+  "policy": {
+    "path": "/Users/alexei/Workspace/archfit-action.worktrees/m2-action-check/.pi/m2-refresh/policy.yaml",
+    "digest": "sha256:fd57fe49c3865871d78810aef07a31e7a843d94df00b43c9b1a5a0de819fa13e",
+    "protected": false,
+    "differs": false
+  },
+  "base": "e0e9681b4111f53416972c23da5d5e0c57dcb30a",
+  "head": "c50cfb5220e98c70025be1d3f7a4b8c9be61a9ce",
+  "date": "2026-11-13",
+  "engine": "3.4.0-53-g5aee74a8"
+}

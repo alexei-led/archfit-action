@@ -1,0 +1,24 @@
+{
+  "schema": "archfit.result.v1",
+  "status": "pass",
+  "summary": "archfit: pass",
+  "errors": [],
+  "unknown": [],
+  "repository": {
+    "state": "clean",
+    "drift": [],
+    "expiring": [],
+    "unread": []
+  },
+  "policy": {
+    "path": ".archfit.yaml",
+    "digest": "sha256:fd57fe49c3865871d78810aef07a31e7a843d94df00b43c9b1a5a0de819fa13e",
+    "protected": false,
+    "differs": false,
+    "target": "refs/remotes/origin/main"
+  },
+  "base": "02948e7e116104618347ad2ad0dc164a2040f49c",
+  "head": "e0e9681b4111f53416972c23da5d5e0c57dcb30a",
+  "date": "2026-11-13",
+  "engine": "3.4.0-53-g5aee74a8"
+}

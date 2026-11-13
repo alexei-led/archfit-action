@@ -1,42 +1,24 @@
 #!/usr/bin/env bash
 # Test double for the docker CLI. It stands in for the archfit engine image so the
 # action's scripts run unchanged, and appends every call to FAKE_DOCKER_LOG as one
-# JSON line: the options, the engine arguments, and the digests of the bundle files
-# the "container" was given.
+# JSON line: the options, the engine arguments, and the digest of the policy file the
+# "container" was given with --policy.
 #
-#   FAKE_FIXTURES             directory of the re-anchor fixtures (tests/fixtures)
-#   FAKE_DOCKER_LOG           JSON lines, one per call (required)
-#   FAKE_STATE                document that `check` prints
-#   FAKE_DRAFT                document that `config init` prints
-#   FAKE_ENGINE_VERSION       version that `--version` reports (default v3.4.0)
-#   FAKE_PLATFORM             os/arch that `image inspect` reports (default linux/amd64)
-#   FAKE_CHECK_RC             exit code of `check`; default is the one its verdict implies,
-#                             and 3 prints no report, as the engine does
-#   FAKE_BASELINE_COMPARABLE  false keeps gate_reference non_comparable after `baseline`
-#   FAKE_BASELINE             file that `baseline` writes as the capture (default: an empty v3 baseline)
-#   FAKE_REANCHOR_BASELINE    file that `baseline --reanchor` writes (default: tests/fixtures/reanchored-baseline.json)
-#   FAKE_REANCHOR_REPORT_FILE text that `baseline --reanchor` prints on stdout (default: tests/fixtures/reanchor-report.txt)
-#   FAKE_REANCHOR_RC          exit code of `baseline --reanchor` (default 0); non-zero prints an engine reason on stderr
-#   FAKE_BASE_RC              exit code of `check --base` (default: as without --base); a failure leaves a
-#                             worktree in the checkout, as a killed engine does, and writes
-#                             /bundle/.archfit-baseline.json, as analysed code can
-#   FAKE_BASE_SYMLINK         directory that `check --base` links .archfit-cache to, as hostile code can
-#   FAKE_COMPARE              file that `config compare` prints (default: tests/fixtures/policy-change/widen.json)
-#   FAKE_COMPARE_NO_SECTION   true removes policy_change from the document
-#   FAKE_COMPARE_RC           exit code of `config compare` (default 0); non-zero prints an engine reason on stderr
-#   FAKE_BASE_LOCKED          true leaves a read-only directory with a file under .archfit-cache/worktrees,
-#                             and a failed `check --base` makes /bundle read-only after its plant
+#   FAKE_DOCKER_LOG      JSON lines, one per call (required)
+#   FAKE_RESULT          result that `check` prints, emitted by the engine (required for check);
+#                        "none" prints nothing, as the engine does on a usage or tool error
+#   FAKE_ENGINE_VERSION  version that `--version` reports (default v4.0.0-rc.1)
+#   FAKE_PLATFORM        os/arch that `image inspect` reports (default linux/amd64)
+#   FAKE_CACHE_PROBE     simulate cache reads/writes when set to 1
+#   FAKE_CHECK_RC        exit code of `check`; default is the one its status implies
+#                        (pass 0, fail 1, unknown 2), and 2 with FAKE_RESULT=none
 #
-# `check --base` needs what docker and git need for `git worktree add` under a read-only
-# .git: the host mountpoint .git/worktrees (else docker fails, 125) and a writable mount
-# over /src/.git/worktrees (else git fails, 3). It prints the state with the origin
-# fields the engine adds, and leaves the per-commit lock file the engine leaves.
+# `check --policy FILE` needs FILE mounted read-only into the container, as the engine
+# needs to read it; anything else is the engine's usage error (exit 2, nothing on stdout).
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
 
 log=${FAKE_DOCKER_LOG:?}
-fixtures=${FAKE_FIXTURES:?}
-captured=$(dirname "$log")/baseline-captured
 
 record() { jq -cn "$@" >>"$log"; }
 # json_array ARGS... prints the arguments as a JSON array of strings.
@@ -70,143 +52,66 @@ fi
 image=$1
 shift
 
-bundle=""
-reference=""
-src=""
-git_worktrees=""
-for ((i = 0; i + 1 < ${#options[@]}; i++)); do
-	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/bundle ]]; then
-		bundle=${options[i + 1]%:/bundle}
-	fi
-	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/src ]]; then
-		src=${options[i + 1]%:/src}
-	fi
-	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/src/.git/worktrees ]]; then
-		git_worktrees=${options[i + 1]%:/src/.git/worktrees}
-	fi
-	if [[ ${options[i]} == --volume && ${options[i + 1]} == *:/reference/.archfit-baseline.json:ro ]]; then
-		reference=${options[i + 1]%%:/reference/.archfit-baseline.json:ro}
-	fi
-done
-# visible NAME prints the host file the container sees at /bundle/NAME: a file mounted
-# over that path wins over the writable directory, as in docker.
-visible() {
-	local i file=$bundle/$1
+# mounted PATH prints the host file mounted read-only at PATH in the container, if any.
+mounted() {
+	local i
 	for ((i = 0; i + 1 < ${#options[@]}; i++)); do
-		[[ ${options[i]} != --volume || ${options[i + 1]} != *":/bundle/$1:ro" ]] ||
-			file=${options[i + 1]%":/bundle/$1:ro"}
+		if [[ ${options[i]} == --volume && ${options[i + 1]} == *":$1:ro" ]]; then
+			printf '%s' "${options[i + 1]%":$1:ro"}"
+			return 0
+		fi
 	done
-	printf '%s' "$file"
+	return 1
 }
-seen='{}'
-for name in .archfit.yaml .archfit-baseline.json .archfit-labels.yaml; do
-	file=$(visible "$name")
-	if [[ -n $bundle && -f $file ]]; then
-		digest=$({ sha256sum "$file" 2>/dev/null || shasum -a 256 "$file"; } | cut -d' ' -f1)
-		seen=$(jq -c --arg n "$name" --arg d "$digest" '. + {($n): $d}' <<<"$seen")
-	fi
+policy_arg=""
+args=("$@")
+for ((i = 0; i + 1 < ${#args[@]}; i++)); do
+	[[ ${args[i]} != --policy ]] || policy_arg=${args[i + 1]}
 done
-reference_digest=""
-[[ -z $reference ]] || reference_digest=$({ sha256sum "$reference" 2>/dev/null || shasum -a 256 "$reference"; } | cut -d' ' -f1)
-record --arg image "$image" --argjson bundle "$seen" --arg reference "$reference_digest" \
+policy_digest=""
+if [[ -n $policy_arg ]] && file=$(mounted "$policy_arg") && [[ -f $file ]]; then
+	policy_digest=$({ sha256sum "$file" 2>/dev/null || shasum -a 256 "$file"; } | cut -d' ' -f1)
+fi
+record --arg image "$image" --arg policy "$policy_digest" \
 	--argjson options "$(json_array "${options[@]}")" --argjson args "$(json_array "$@")" \
-	'{command: "run", image: $image, options: $options, args: $args, bundle: $bundle, reference: $reference}'
+	'{command: "run", image: $image, options: $options, args: $args, policy: $policy}'
 
 case ${1:-} in
 --version)
-	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v3.4.0}"
+	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v4.0.0-rc.1}"
 	;;
 check)
-	if ! jq -e 'has(".archfit.yaml")' <<<"$seen" >/dev/null; then
-		echo "error: config not found: /bundle/.archfit.yaml" >&2
-		exit 3
+	if [[ ${FAKE_CACHE_PROBE:-0} == 1 ]]; then
+		cache=""
+		for ((i = 0; i + 1 < ${#options[@]}; i++)); do
+			if [[ ${options[i]} == --volume ]]; then
+				case ${options[i + 1]} in
+				*:/src) cache=${options[i + 1]%:/src}/.archfit-cache ;;
+				*:/src/.archfit-cache:rw) cache=${options[i + 1]%:/src/.archfit-cache:rw} ;;
+				esac
+			fi
+		done
+		[[ -d $cache ]] || exit 125
+		if [[ -f $cache/facts/checkfacts/poisoned.json ]]; then
+			cat "$(dirname "$FAKE_RESULT")/pass.json"
+			exit 0
+		fi
+		printf 'engine wrote here\n' >"$cache/engine-write"
 	fi
-	if [[ ${FAKE_CHECK_RC:-} == 3 ]]; then
-		printf 'error: analyzer go/packages failed: go list exited 1\n→ run: archfit doctor\n' >&2
-		exit 3
+	if [[ -n $policy_arg && -z $policy_digest ]]; then
+		echo "archfit: read $policy_arg: open $policy_arg: no such file or directory" >&2
+		exit 2
 	fi
-	echo "fake engine: check /src" >&2
-	if [[ " $* " == *" --base "* ]]; then
-		base=" $* "
-		base=${base##* --base }
-		base=${base%% *}
-		if [[ ! -d $src/.git/worktrees ]]; then
-			echo "docker: Error response from daemon: mkdir $src/.git/worktrees: read-only file system" >&2
-			exit 125
-		fi
-		if [[ -z $git_worktrees || ! -d $git_worktrees ]]; then
-			echo "error: cannot create worktree for ref \"$base\": git worktree add: fatal: could not create directory of '.git/worktrees/wt': Read-only file system" >&2
-			exit 3
-		fi
-		cache=$src/.archfit-cache
-		if [[ -n ${FAKE_BASE_SYMLINK:-} ]]; then
-			ln -s "$FAKE_BASE_SYMLINK" "$cache"
-		fi
-		mkdir -p "$cache/worktrees/$base/wt" "$git_worktrees/wt"
-		: >"$cache/worktrees/$base.lock"
-		if [[ -n ${FAKE_BASE_RC:-} ]]; then
-			printf 'gitdir: /src/.git/worktrees/wt\n' >"$cache/worktrees/$base/wt/.git"
-			printf '{"schema_version":"archfit.baseline.v3","accepted":["planted"]}\n' >"$bundle/.archfit-baseline.json"
-			[[ ${FAKE_BASE_LOCKED:-} != true ]] || chmod a-w "$bundle"
-			echo "error: cannot create worktree for ref \"$base\": git worktree add exited 128" >&2
-			exit "$FAKE_BASE_RC"
-		fi
-		rm -rf "${cache:?}/worktrees/$base" "$git_worktrees/wt"
-		if [[ ${FAKE_BASE_LOCKED:-} == true ]]; then
-			mkdir -p "$cache/worktrees/locked"
-			: >"$cache/worktrees/locked/file"
-			chmod a-w "$cache/worktrees/locked"
-		fi
-		jq '.comparison += {origin_status: "comparable", introduced_finding_ids: [.findings[0].id], resolved_finding_ids: []}
-			| .findings |= (to_entries | map(.value + {origin: (if .key == 0 then "introduced" else "pre_existing" end)}))' "${FAKE_STATE:?}"
-	elif [[ -f $captured && ${FAKE_BASELINE_COMPARABLE:-true} == true ]]; then
-		jq '.gate_reference = {status: "comparable", base_ref: "baseline", reasons: []}' "${FAKE_STATE:?}"
-	else
-		cat "${FAKE_STATE:?}"
+	if [[ ${FAKE_RESULT:?} == none ]]; then
+		echo "archfit: read the added lines: git add --all exited 128: fatal: adding files failed" >&2
+		exit "${FAKE_CHECK_RC:-2}"
 	fi
-	exit "${FAKE_CHECK_RC:-$(jq -r '{healthy: 0, blocked: 1, needs_attention: 2}[.verdict] // 3' "$FAKE_STATE")}"
-	;;
-config)
-	if [[ ${2:-} == compare ]]; then
-		if [[ -n ${FAKE_COMPARE_RC:-} && ${FAKE_COMPARE_RC} != 0 ]]; then
-			echo "error: candidate config: decode failed" >&2
-			exit "$FAKE_COMPARE_RC"
-		fi
-		if [[ ${FAKE_COMPARE_NO_SECTION:-} == true ]]; then
-			jq 'del(.policy_change)' "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"
-		else
-			cat "${FAKE_COMPARE:-$fixtures/policy-change/widen.json}"
-		fi
-		exit 0
-	fi
-	cat "${FAKE_DRAFT:?}"
-	;;
-baseline)
-	if [[ " $* " == *" --reanchor "* ]]; then
-		# The engine reads the stored file from its read-only mount and writes the new one to /bundle.
-		if [[ -z $reference ]]; then
-			echo "error: stored baseline /reference/.archfit-baseline.json: no such file" >&2
-			exit 3
-		fi
-		if [[ ${FAKE_REANCHOR_RC:-0} != 0 ]]; then
-			echo 'error: schema version "archfit.baseline.v1" in /reference/.archfit-baseline.json cannot be re-anchored' >&2
-			exit "$FAKE_REANCHOR_RC"
-		fi
-		cp "${FAKE_REANCHOR_BASELINE:-$fixtures/reanchored-baseline.json}" "$bundle/.archfit-baseline.json"
-		: >"$captured"
-		cat "${FAKE_REANCHOR_REPORT_FILE:-$fixtures/reanchor-report.txt}"
-		exit 0
-	fi
-	if [[ -n ${FAKE_BASELINE:-} ]]; then
-		cp "$FAKE_BASELINE" "$bundle/.archfit-baseline.json"
-	else
-		printf '{"schema_version":"archfit.baseline.v3","accepted":[]}\n' >"$bundle/.archfit-baseline.json"
-	fi
-	: >"$captured"
-	echo "baseline saved: /bundle/.archfit-baseline.json"
+	echo "archfit: the engine's notes go to stderr" >&2
+	cat "$FAKE_RESULT"
+	exit "${FAKE_CHECK_RC:-$(jq -r '{pass: 0, fail: 1, unknown: 2}[.status] // 3' "$FAKE_RESULT")}"
 	;;
 *)
 	echo "fake docker: unsupported engine arguments: $*" >&2
-	exit 3
+	exit 2
 	;;
 esac

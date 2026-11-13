@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate the inputs, pick the mode and name the commit to check out.
+# Validate the inputs and name the commit to check out.
 # Runs before the checkout, so a misconfigured workflow fails before any engine work.
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
@@ -21,12 +21,12 @@ if [[ -z $image_digest ]]; then
 	esac
 fi
 endpoint=${ARCHFIT_ENDPOINT:-}
-mode=${ARCHFIT_MODE:-}
+mode=${ARCHFIT_MODE:-report}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
 	die "engine-version '$engine_version' is not a version such as $SUPPORTED_ENGINE_VERSION"
-# This action runs one engine: the App's manifest, the envelope schema and the baseline
-# format are v3's. An older image is refused here, not adapted.
+# This action runs one engine: the App's manifest, the envelope schema and the result
+# contract are its. Another image is refused here, not adapted.
 [[ $engine_version == "$SUPPORTED_ENGINE_VERSION" ]] ||
 	die "engine-version '$engine_version' is not supported: this action runs engine $SUPPORTED_ENGINE_VERSION only; pin $SUPPORTED_ENGINE_VERSION and its digest"
 [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
@@ -42,43 +42,28 @@ if [[ -n $endpoint ]]; then
 	[[ $endpoint != */ ]] || die "endpoint must not end with '/'; give the App base URL exactly, for example https://archfit.example"
 fi
 
-mode=${mode:-report}
-case $mode in
-report | discovery | baseline | reanchor) ;;
-*) die "mode must be report, discovery, baseline or reanchor, got '$mode'" ;;
-esac
+[[ $mode == report ]] ||
+	die "mode '$mode' is not supported: Action 4 only checks pull_request, push and merge_group runs; remove the mode input"
 
 # Only the events the App accepts. The others are refused before the checkout:
 # workflow_run and pull_request_target run with the base repository's privileges on a
-# commit the pull request author controls. The App answers unsupported_event for them.
+# commit the pull request author controls, and a dispatched run has no change to check.
 event=${GITHUB_EVENT_NAME:?}
 case $event in
-pull_request | push | workflow_dispatch | merge_group) ;;
-*) die "archfit runs on pull_request, push, merge_group and workflow_dispatch events only; '$event' is refused before the checkout. Trigger the archfit workflow with one of those events." ;;
+pull_request | push | merge_group) ;;
+*) die "archfit runs on pull_request, push and merge_group events only; '$event' is refused before the checkout. Trigger the archfit workflow with one of those events." ;;
 esac
-# The App accepts a dispatched run only as discovery, baseline or reanchor; a dispatched report would
-# end as unsupported_event, so it is refused before any work.
-[[ $event != workflow_dispatch || $mode != report ]] ||
-	die "a workflow_dispatch run does not report: set mode: discovery to propose a policy, mode: baseline to capture accepted debt or mode: reanchor to carry it to this engine. Reports come from pull_request, merge_group and push runs."
-# The analysed commit is tied to the event payload. A pull request is analysed as it
-# would land: the test merge commit of the run (checked against the event's base and
-# head in run.sh), or the head when the event reports conflicts. The head stays the
-# commit approval binds to. A merge group is analysed at the group's own commit.
-integration=""
+# The checked commit is tied to the event payload. A pull request is checked at its head,
+# the commit the App binds the result to. A merge group is checked at the group's own commit.
 case $event in
-pull_request)
-	commits=$(pull_request_commits) ||
-		die "this pull_request run has no merge commit to analyse: GITHUB_REF '${GITHUB_REF:-}' is not refs/pull/<number>/merge or GITHUB_SHA is not a commit"
-	read -r integration ref <<<"$commits"
-	;;
+pull_request) ref=$(event_field .pull_request.head.sha) ;;
 merge_group)
-	# Only a report, only for the queue of the default branch: the App's protected inputs
-	# and approvals are the default branch's, and no other branch gains trust here. The
-	# job context only locates the group commit; the event names it. The queue branch's
-	# name proves nothing and is not read.
-	[[ $mode == report ]] || die "a merge_group run only reports; $mode mode runs by workflow_dispatch on the default branch"
+	# Only the queue of the default branch: the App's protected inputs and approvals are
+	# the default branch's, and no other branch gains trust here. The job context only
+	# locates the group commit; the event names it. The queue branch's name proves
+	# nothing and is not read.
 	[[ $(event_field .action) == checks_requested ]] ||
-		die "merge_group action '$(event_field .action)' is not checks_requested; nothing is analysed"
+		die "merge_group action '$(event_field .action)' is not checks_requested; nothing is checked"
 	default_branch=$(event_field .repository.default_branch)
 	[[ -n $default_branch && $(event_field .merge_group.base_ref) == "refs/heads/$default_branch" ]] ||
 		die "this merge group targets '$(event_field .merge_group.base_ref)'; archfit gates the merge queue of the default branch (${default_branch:-unknown}) only"
@@ -87,24 +72,20 @@ merge_group)
 	[[ ${GITHUB_SHA:-} == "$ref" && ${GITHUB_REF:-} == "$(event_field .merge_group.head_ref)" ]] ||
 		die "the job runs at ${GITHUB_REF:-an unknown ref} ${GITHUB_SHA:-} but the merge_group event names $(event_field .merge_group.head_ref) $ref; run archfit in the job the merge_group event started"
 	;;
-*) ref=${GITHUB_SHA:?} ;;
+push)
+	# A push is checked against the branch it updates; a tag has no target branch.
+	[[ ${GITHUB_REF:-} == refs/heads/?* ]] ||
+		die "this push updates ${GITHUB_REF:-an unknown ref}, not a branch; archfit checks pushes to branches only"
+	ref=${GITHUB_SHA:?}
+	;;
 esac
-is_sha "$ref" || die "cannot tell which commit this $event event analyses (got '$ref')"
-
-# Discovery proposes the first policy; baseline and reanchor capture accepted debt. All
-# describe the protected default branch, so none runs anywhere else.
-if [[ $mode != report ]]; then
-	default_branch=$(event_field .repository.default_branch)
-	[[ -n $default_branch && ${GITHUB_REF:-} == "refs/heads/$default_branch" ]] ||
-		die "$mode mode runs on the default branch (${default_branch:-unknown}) only; this run is on ${GITHUB_REF:-an unknown ref}"
-fi
+is_sha "$ref" || die "cannot tell which commit this $event event checks (got '$ref')"
 
 work=$(work_dir)
 rm -rf "$work"
 mkdir -p "$work"
 
-set_output mode "$mode"
 set_output engine-version "$engine_version"
 set_output image-digest "$image_digest"
 set_output ref "$ref"
-printf 'archfit: mode=%s event=%s commit=%s%s\n' "$mode" "$event" "$ref" "${integration:+ integration=$integration}"
+printf 'archfit: event=%s commit=%s\n' "$event" "$ref"
