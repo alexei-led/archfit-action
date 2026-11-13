@@ -31,15 +31,11 @@ jobs:
         with:
           go-version-file: tests/validate/go.mod
           cache: false
-      - name: Verify the unmodified v3.4.0 release capture
-        run: echo "958a3de5c00bd41d8221a58381c6f30653ba1ae114f285ec34401954509c5d34  tests/fixtures/state.json" | sha256sum --check
-      - name: Envelopes for pull_request, push, discovery and baseline; refused events; transport; edge cases
+      - name: Envelope 2 for pull_request, push and merge_group; refused events; transport; edge cases
         run: bash tests/run.sh
-        env:
-          ARCHFIT_TEST_STATE: tests/fixtures/state.json
 
   engine:
-    name: Pinned engine image (v3.4.0, ${{ matrix.platform }})
+    name: Pinned engine image (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -60,11 +56,11 @@ jobs:
         with:
           go-version-file: tests/validate/go.mod
           cache: false
-      - name: Report, baseline capture, comparable report, pull request origin
+      - name: Push, pull requests, a re-run, a merge group and the eol case on the real engine
         run: bash tests/engine-smoke.sh
         env:
           ARCHFIT_FIXTURES_OUT: ${{ runner.temp }}/fixtures
-      # The re-anchor fixtures tests/run.sh replays, as this image wrote them.
+      # The results tests/run.sh replays, as this image wrote them.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: engine-fixtures-${{ matrix.arch }}

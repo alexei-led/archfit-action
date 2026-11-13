@@ -5,13 +5,15 @@
 # The engine image. The image-digest input selects the build inside it.
 readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 # The only engine release this action runs (the App's manifest names its image digests).
-readonly SUPPORTED_ENGINE_VERSION=v3.4.0
+readonly SUPPORTED_ENGINE_VERSION=v4.0.0-rc.1
 # Its per-platform manifest digests, used when the workflow names no image-digest. The
 # multi-arch index digest is never used: the App's manifest lists one digest per platform.
-readonly ENGINE_DIGEST_AMD64=sha256:bdcfe29bf9def9a4f0ae544923bc3e755fdec2c2cd6c46ec353c01e60642896b
-readonly ENGINE_DIGEST_ARM64=sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f
-# The engine state contract this action carries (`archfit check --json`).
-readonly STATE_SCHEMA=archfit.architecture-state.v1
+# Placeholder: the v4.0.0-rc.1 image is not published yet. Its digests replace these zeros
+# before the pull request that introduces them leaves draft.
+readonly ENGINE_DIGEST_AMD64=sha256:0000000000000000000000000000000000000000000000000000000000000000
+readonly ENGINE_DIGEST_ARM64=sha256:0000000000000000000000000000000000000000000000000000000000000000
+# The engine result contract this action carries (`archfit check --format json`).
+readonly RESULT_SCHEMA=archfit.result.v1
 
 die() {
 	printf '::error::%s\n' "$(escape "$*")" >&2
@@ -52,24 +54,7 @@ is_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 # event_field FILTER prints a field of the event payload, or nothing when it is absent.
 event_field() { jq -r "$1 // empty" "${GITHUB_EVENT_PATH:?}"; }
 
-# pull_request_commits prints "merged MERGE" for the test merge commit of the pull request,
-# or "conflicts HEAD" when the event reports it as not mergeable (the head is analysed).
-# The merge commit is located by the job's GITHUB_SHA on refs/pull/N/merge, not by the
-# event's merge_commit_sha: GitHub fills that field and `mergeable` in after the event
-# is sent, so both are often null in the payload of a run that has a merge commit. The
-# locator is not trusted: run.sh accepts it only when its parents are the event's base
-# and head. mergeable is read raw, because `// empty` would turn false into nothing.
-pull_request_commits() {
-	if [[ $(jq -r '.pull_request.mergeable | tostring' "${GITHUB_EVENT_PATH:?}") == false ]]; then
-		printf 'conflicts %s\n' "$(event_field .pull_request.head.sha)"
-	elif [[ ${GITHUB_REF:-} =~ ^refs/pull/[0-9]+/merge$ ]] && is_sha "${GITHUB_SHA:-}"; then
-		printf 'merged %s\n' "$GITHUB_SHA"
-	else
-		return 1
-	fi
-}
-
-# work_dir holds this run's bundle, payload and envelope: under RUNNER_TEMP, outside
+# work_dir holds this run's policy copy, result and envelope: under RUNNER_TEMP, outside
 # the checkout that the engine container sees.
 work_dir() { printf '%s/archfit' "${RUNNER_TEMP:?RUNNER_TEMP is not set}"; }
 

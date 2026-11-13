@@ -1,5 +1,4 @@
 repository: github.com/coupling-dev/archfit-app
-revision: 5360dbdccf2f463ee8e350d47fe419539291989e
-path: internal/wire/envelope/envelope.v1.schema.json
-sha256: 0c2de1a3691ac85935f04887b94bc98dbc01f57f65a9c4fc3db276d5bf78b7e6
-contract: docs/design/merge-queue.md at that revision (merge-group binding, revision 1), sha256 a890f7702047b8b42c96b6908c87a0e32840d856139f5a705283307ed9995cde
+revision: cf03b6f415d32606b54cea5a664c716da49fbac3
+path: internal/wire/envelope/envelope.v2.schema.json
+sha256: 53145177a684ba57575769ad35ef45245d453525f8eb0e552cd46547bcec5730

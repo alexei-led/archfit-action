@@ -1,5 +1,5 @@
 name: archfit
-description: Run the pinned archfit engine image on this repository and report the architecture state to the archfit GitHub App
+description: Run the pinned archfit engine image on this change and send its result to the archfit GitHub App
 author: alexei-led
 branding:
   icon: git-branch
@@ -10,12 +10,9 @@ inputs:
   endpoint:
     description: >-
       archfit App base URL over https, without a trailing slash, for example
-      https://archfit.example. Reports go to <endpoint>/v1/reports, discovery
-      drafts to <endpoint>/v1/discoveries, captured baselines to
-      <endpoint>/v1/baselines and re-anchored baselines to <endpoint>/v1/reanchors.
-      Empty means analyze only: nothing is sent, pull requests and merge groups are
-      measured against the base's policy, baseline and labels, a blocked verdict or missing required evidence fails the
-      job, and a captured or re-anchored baseline is an artifact only.
+      https://archfit.example. Results go to <endpoint>/v1/reports. Empty means
+      check only: nothing is sent, the change is still judged by the policy of the
+      target branch, and the job fails unless the status is pass.
     required: false
     default: ""
   audience:
@@ -26,7 +23,7 @@ inputs:
     default: ""
   engine-version:
     description: >-
-      Engine release of the image, for example v3.4.0. Empty means the engine this
+      Engine release of the image, for example v4.0.0-rc.1. Empty means the engine this
       action release pins. The action refuses an image that reports another version.
     required: false
     default: ""
@@ -39,35 +36,32 @@ inputs:
     default: ""
   mode:
     description: >-
-      report (measure and upload the state), discovery (propose a first policy),
-      baseline (capture accepted debt) or reanchor (carry the baseline on the default
-      branch to this engine and accept nothing new). With an endpoint the App proposes a
-      baseline or re-anchor in a pull request, else it is an artifact only. Empty means
-      report. Discovery, baseline and reanchor run on the default branch only.
+      Empty or report. Action 4 has one mode, the check of pull_request, push
+      and merge_group runs; any other value is refused.
     required: false
     default: ""
 
 outputs:
   verdict:
-    description: Engine verdict (healthy, needs_attention or blocked); empty when nothing was measured.
+    description: Status of the change (pass, fail or unknown); empty when nothing was checked.
     value: ${{ steps.run.outputs.verdict }}
   payload-file:
-    description: The state report, discovery draft, or baseline or re-anchored baseline the engine produced; empty when nothing was measured.
+    description: The engine's result (archfit.result.v1), the bytes the upload carries; empty when nothing was checked.
     value: ${{ steps.run.outputs.payload-file }}
   report-file:
-    description: The engine's re-anchor report (what it kept, dropped and left unaccepted); empty unless mode is reanchor.
+    description: Always empty; Action 4 has no re-anchor report.
     value: ${{ steps.run.outputs.report-file }}
   envelope-file:
-    description: The archfit.report-envelope.v1 line, exactly as sent in the X-Archfit-Envelope header; empty when none was written.
+    description: The archfit.upload-envelope.v2 line, exactly as sent in the X-Archfit-Envelope header; empty when none was written.
     value: ${{ steps.report.outputs.envelope-file }}
   app-status:
     description: HTTP status of the App's final answer, "000" when no answer arrived; empty when nothing was sent.
     value: ${{ steps.report.outputs.app-status }}
   app-answer:
     description: >-
-      The App's JSON answer on one line, for example {"conclusion":"success","reason":"healthy"}
-      for a report, {"pull_request":12,"url":"https://github.com/o/r/pull/12"} or
-      {"unchanged":true} for a baseline or re-anchor, and {"error":"<code>"} for a refusal.
+      The App's JSON answer on one line, for example {"status":"pass"} or
+      {"status":"unknown","reason":"policy_changed"} for an accepted result, and
+      {"error":"<code>"} for a refusal.
     value: ${{ steps.report.outputs.app-answer }}
 
 runs:
@@ -82,8 +76,8 @@ runs:
         ARCHFIT_MODE: ${{ inputs.mode }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
-    # Full history for the merge base and the engine's history evidence; no credential
-    # left in .git/config, which the engine container mounts.
+    # Full history and every branch, fetched now: the target tip, the merge base and the
+    # engine's base. No credential is left in .git/config, which the engine container mounts.
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         ref: ${{ steps.prepare.outputs.ref }}
@@ -93,34 +87,17 @@ runs:
     - id: run
       shell: bash
       env:
-        ARCHFIT_MODE: ${{ steps.prepare.outputs.mode }}
-        ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
         ARCHFIT_ENGINE_VERSION: ${{ steps.prepare.outputs.engine-version }}
         ARCHFIT_IMAGE_DIGEST: ${{ steps.prepare.outputs.image-digest }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/run.sh"
 
-    # Before the upload, so the result survives a failed upload. archfit-report is the
-    # name the App's graph view reads: one file, the exact report bytes.
+    # Before the upload, so the result survives a failed upload. archfit-result is the
+    # name the App reads the result back from: one file, the exact bytes of the upload.
     - if: steps.run.outputs.payload-file != ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.run.outputs.artifact-name }}
-        path: |
-          ${{ steps.run.outputs.payload-file }}
-          ${{ steps.run.outputs.report-file }}
-        if-no-files-found: error
-        include-hidden-files: true
-        overwrite: true
-
-    # The policy-change classification of a pull request. A separate artifact: the App's
-    # archfit-report artifact keeps exactly the report bytes. Optional: its failure never
-    # skips the report.
-    - if: steps.run.outputs.policy-change-file != ''
-      continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: archfit-policy-change
-        path: ${{ steps.run.outputs.policy-change-file }}
+        path: ${{ steps.run.outputs.payload-file }}
         if-no-files-found: error
         overwrite: true
 

@@ -1,0 +1,29 @@
+{
+  "schema": "archfit.result.v1",
+  "status": "unknown",
+  "summary": "archfit: unknown, no verdict",
+  "errors": [],
+  "unknown": [
+    {
+      "path": ".archfit.yaml",
+      "cause": "policy",
+      "what": "differs from refs/remotes/origin/main",
+      "why": "only owners change the policy",
+      "next": {
+        "kind": "restore",
+        "text": "git checkout refs/remotes/origin/main -- .archfit.yaml"
+      }
+    }
+  ],
+  "policy": {
+    "path": ".archfit.yaml",
+    "digest": "sha256:438643452717cbde32b32cc978a53ace1a4cd04ca2fe409afd0f5678da8ceb6e",
+    "protected": false,
+    "differs": true,
+    "target": "refs/remotes/origin/main"
+  },
+  "base": "0ed1e1080324dc9e1edf0c07314b70fac7e46cc3",
+  "head": "47a4a49a2735357607bae97e575b6226bcaf1347",
+  "date": "2026-11-13",
+  "engine": "v4.0.0-dev.513e72b"
+}

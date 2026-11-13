@@ -1,0 +1,54 @@
+{
+  "schema": "archfit.result.v1",
+  "status": "fail",
+  "summary": "archfit: fail, 2 errors",
+  "errors": [
+    {
+      "path": "pkg/a/c.go",
+      "line": 3,
+      "rule": "graph",
+      "what": "a -> c is not an allowed dependency",
+      "why": "a new dependency between modules needs an owner",
+      "balance": {
+        "value": 9,
+        "min": 7
+      },
+      "next": {
+        "kind": "command",
+        "text": "archfit request -m \"<why you need it>\"",
+        "note": "do not copy the code"
+      },
+      "from": "a",
+      "to": "c",
+      "key": "graph a c pkg/c",
+      "from_change": true
+    },
+    {
+      "path": "pkg/a/c.go",
+      "line": 3,
+      "rule": "no-a-to-c",
+      "what": "a must not depend on c",
+      "why": "Module a stays independent of c.",
+      "instead": "Call b, which wraps c.",
+      "next": {
+        "kind": "fix",
+        "text": "fix the code"
+      },
+      "from": "a",
+      "to": "c",
+      "key": "no-a-to-c a c pkg/c",
+      "from_change": true
+    }
+  ],
+  "unknown": [],
+  "policy": {
+    "path": "/tmp/archfit/policy/.archfit.yaml",
+    "digest": "sha256:eca48b67757e4bc199d54ca8c37e4f8f6c4ccec9b36074ffb9d22acbc953db23",
+    "protected": false,
+    "differs": false
+  },
+  "base": "c85656551c85549363a542867bc425052b35cc6a",
+  "head": "fe0fdc92bab05c41b475c9a18e6921d84dc3f350",
+  "date": "2026-11-13",
+  "engine": "v4.0.0-dev.513e72b"
+}

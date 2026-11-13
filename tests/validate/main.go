@@ -1,4 +1,4 @@
-// Command validate checks archfit report envelopes against the vendored App schema
+// Command validate checks archfit upload envelopes against the vendored App schema
 // and against the App decoder's rules that JSON Schema cannot express.
 //
 // Usage: validate SCHEMA ENVELOPE[=PAYLOAD]...
@@ -64,7 +64,7 @@ func compile(path string) (*jsonschema.Schema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	const url = "file:///envelope.v1.schema.json"
+	const url = "file:///envelope.schema.json"
 	c := jsonschema.NewCompiler()
 	if err := c.AddResource(url, doc); err != nil {
 		return nil, err
