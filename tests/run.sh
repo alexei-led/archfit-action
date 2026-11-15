@@ -12,7 +12,6 @@
 # Needs bash, git, jq, curl, python3 and go.
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
-FAKE_ENGINE=true
 # shellcheck source=tests/helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
 
@@ -846,19 +845,32 @@ for arch in X64 ARM64; do
 	export RUNNER_ARCH=$arch FAKE_PLATFORM=$platform
 	start_app "[$ok_answer]"
 	run_action "$origin"
-	if [[ $pinned =~ ^sha256:[0-9a-f]{64}$ ]]; then
-		expect_eq "the action succeeds" 0 "$action_rc"
-		expect_eq "prepare resolves the pinned engine" "$ENGINE_VERSION $pinned" "$(out engine-version) $(out image-digest)"
-		expect_eq "the envelope names them" "$ENGINE_VERSION $pinned $platform" \
-			"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
-		expect "the image is pulled by that digest" json_ok \
-			'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$pinned"
-	else
-		expect_eq "an unpublished release pin fails" 1 "$action_rc"
-		expect "the error names the missing pin" log_has "an unpublished release pin must be filled"
-		expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
-		expect_eq "no container ran" 0 "$(engine_calls)"
-	fi
+	expect_eq "the action succeeds" 0 "$action_rc"
+	expect_eq "prepare resolves the pinned engine" "$ENGINE_VERSION $pinned" "$(out engine-version) $(out image-digest)"
+	expect_eq "the envelope names them" "$ENGINE_VERSION $pinned $platform" \
+		"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+	expect "the image is pulled by that digest" json_ok \
+		'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$pinned"
+done
+
+for arch in X64 ARM64; do
+	begin "an unpublished default pin on $arch is refused before checkout"
+	on_push "$c2"
+	unset ARCHFIT_IMAGE_DIGEST
+	export RUNNER_ARCH=$arch
+	mkdir -p "$case_dir/scripts"
+	cp "$root/scripts/lib.sh" "$root/scripts/prepare.sh" "$case_dir/scripts/"
+	case $arch in
+	X64) name=ENGINE_DIGEST_AMD64 ;;
+	ARM64) name=ENGINE_DIGEST_ARM64 ;;
+	esac
+	replace "$case_dir/scripts/lib.sh" "readonly $name=$(lib_constant "$name")" "readonly $name=PENDING_$arch"
+	rc=0
+	bash "$case_dir/scripts/prepare.sh" >"$case_dir/log" 2>&1 || rc=$?
+	expect_eq "prepare fails" 1 "$rc"
+	expect "the error names the missing release pin" log_has "the release image digest for $arch has not been pinned"
+	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+	expect_eq "no container ran" 0 "$(engine_calls)"
 done
 
 begin "image-digest omitted on a runner without an engine image: refused before the checkout"

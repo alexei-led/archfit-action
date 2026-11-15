@@ -8,10 +8,8 @@ readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 readonly SUPPORTED_ENGINE_VERSION=v4.0.0
 # Its per-platform manifest digests, used when the workflow names no image-digest. The
 # multi-arch index digest is never used: the App's manifest lists one digest per platform.
-# Release slots: replace with the published v4.0.0 platform manifest digests.
-# These values are intentionally invalid, so a missing pin fails before checkout.
-readonly ENGINE_DIGEST_AMD64=PENDING_AMD64
-readonly ENGINE_DIGEST_ARM64=PENDING_ARM64
+readonly ENGINE_DIGEST_AMD64=sha256:3edf066717390ef79f8ae42974c62ccbd93a5bb6b9bc571cbf1dcf9c9ae0fc26
+readonly ENGINE_DIGEST_ARM64=sha256:c4959b487404d1ad08dda10329d2cbde7e143e1301d523dce81b1f6aa96d129a
 # The engine result contract this action carries (`archfit check --format json`).
 readonly RESULT_SCHEMA=archfit.result.v1
 

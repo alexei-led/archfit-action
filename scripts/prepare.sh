@@ -20,6 +20,8 @@ if [[ -z $image_digest ]]; then
 	*) die "runner architecture '${RUNNER_ARCH:-unset}' has no engine image (X64, ARM64); set image-digest only if the App's manifest lists one for it" ;;
 	esac
 fi
+# Release placeholders are not valid image identities and must fail before checkout.
+[[ $image_digest != PENDING_* ]] || die "the release image digest for ${RUNNER_ARCH:-unknown} has not been pinned"
 endpoint=${ARCHFIT_ENDPOINT:-}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
@@ -29,7 +31,7 @@ endpoint=${ARCHFIT_ENDPOINT:-}
 [[ $engine_version == "$SUPPORTED_ENGINE_VERSION" ]] ||
 	die "engine-version '$engine_version' is not supported: this action runs engine $SUPPORTED_ENGINE_VERSION only; pin $SUPPORTED_ENGINE_VERSION and its digest"
 [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
-	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused and an unpublished release pin must be filled"
+	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused"
 # The endpoint doubles as the OIDC audience, which the App compares byte for byte with
 # its base URL; a trailing slash would make the audience and the upload URL disagree.
 # Plain http only reaches a loopback App, as in tests: the upload carries a bearer token.
