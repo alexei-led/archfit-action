@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Write the report envelope and send the payload to the archfit App.
+# Write the upload envelope and send the result to the archfit App.
 #
-# The envelope is the App's contract: archfit.report-envelope.v1, owned by archfit-app
-# (schema/ holds the vendored copy CI validates against). It states what was analysed:
-# repository, event, pull request, head, base and merge base, the commit analysed and how
-# the pull request integrates (merged or conflicts), run, engine identity, and the
-# digests of the payload and of the baseline and labels files the engine read.
-# A merge group states its group commit as head and analysed commit, and no base: the App
-# reads the queue and the members from GitHub, never from the envelope.
+# The envelope is the App's contract: archfit.upload-envelope.v2, owned by archfit-app
+# (schema/ holds the vendored copy CI validates against). It states what was checked:
+# repository, event, pull request, head, merge base, the target branch and the tip the
+# policy was read from, the policy digest, run, engine identity, and the digest of the
+# result bytes, which are the body.
 # Every field is self-reported by a job that runs pull-request code. The App binds the
 # envelope to the OIDC token's claims and to GitHub's own data and trusts no field
-# alone: a matching envelope is necessary for an accepted report, never sufficient.
+# alone: a matching envelope is necessary for an accepted result, never sufficient.
 set -euo pipefail
 # shellcheck source=scripts/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 require jq curl
 
-# App limits: the upload body cap (wire/report MaxBytes), the discovery draft cap
-# (control/onboarding), the baseline file cap (wire/policy MaxBaselineBytes; a re-anchor uploads one too), and the
-# raw envelope cap (wire/envelope).
+# App limits: the upload body cap (gate/ingest) and the raw envelope cap (wire/envelope).
 readonly REPORT_MAX_BYTES=5242880
-readonly DISCOVERY_MAX_BYTES=1048576
-readonly BASELINE_MAX_BYTES=1048576
 readonly ENVELOPE_MAX_BYTES=8192
 # Retries happen only when the App asks for one (429), failed (5xx), or did not answer.
 readonly MAX_ATTEMPTS=5
@@ -35,30 +29,17 @@ audience=${ARCHFIT_AUDIENCE:-$endpoint}
 work=$(work_dir)
 
 fact() { jq -r ".$1" "$facts"; }
-mode=$(fact mode)
-kind=$(fact kind)
-verdict=$(fact verdict)
+result_status=$(fact status)
 payload=$(fact payload_file)
 fork=$(fact fork)
 
-# Without an App the capture stays an artifact: nobody would open its pull request.
-if [[ $mode == baseline || $mode == reanchor ]] && [[ -z $endpoint ]]; then
-	done_what="captured"
-	[[ $mode == baseline ]] || done_what="re-anchored"
-	notice "baseline $done_what and comparable in this image. Commit the archfit-baseline artifact as .archfit-baseline.json in a pull request that a policy owner approves."
-	summary "Baseline: the \`archfit-baseline\` artifact holds \`.archfit-baseline.json\`. Commit it in a pull request that a policy owner approves."
-	exit 0
-fi
-[[ -n $kind ]] || exit 0 # nothing was measured; run.sh said why
-[[ -f $payload ]] || die "payload $payload is missing"
+[[ -n $payload ]] || exit 0 # nothing was checked; run.sh said why
+[[ -f $payload ]] || die "result $payload is missing"
 
-# envelope [WITH_POLICY_CHANGE] prints the 18 keys of archfit.report-envelope.v1 on one
-# line, typed as the App decodes them: integers for pull_request, run_id and run_attempt,
-# sha256:-prefixed payload and image digests, bare hex input digests ("" = the engine read
-# no such file). With WITH_POLICY_CHANGE it adds the optional policy_change: the engine's
-# classification of a pull request's policy change, when one was made.
+# envelope prints the 15 keys of archfit.upload-envelope.v2 on one line, typed as the App
+# decodes them: integers for pull_request, run_id and run_attempt, sha256:-prefixed digests.
 envelope() {
-	local digest with=${1:-false}
+	local digest
 	[[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]{0,18}$ ]] || die "GITHUB_RUN_ID is not a run ID"
 	[[ ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]{0,8}$ ]] || die "GITHUB_RUN_ATTEMPT is not an attempt number"
 	digest=$(sha256_hex "$payload") || die "cannot hash $payload"
@@ -67,68 +48,38 @@ envelope() {
 		--argjson run_id "$GITHUB_RUN_ID" \
 		--argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
 		--arg payload_digest "sha256:$digest" \
-		--argjson with "$with" \
-		'{schema_version: "archfit.report-envelope.v1", kind, repository: $repository, event,
-		  pull_request, head_sha, base_sha, merge_base_sha, analyzed_sha, integration,
+		'{schema_version: "archfit.upload-envelope.v2", repository: $repository, event,
+		  pull_request, head_sha, merge_base_sha, target_ref, target_sha, policy_digest,
 		  run_id: $run_id, run_attempt: $run_attempt,
-		  engine_version, image_digest, platform,
-		  payload_digest: $payload_digest, baseline_digest, labels_digest}
-		  + (if $with and .policy_change != null then {policy_change} else {} end)' "$facts"
+		  engine_version, image_digest, platform, payload_digest: $payload_digest}' "$facts"
 }
 
 envelope_file=$work/envelope.json
-envelope true >"$envelope_file"
-# The envelope travels in one header the App caps. The classification is report-only, so a
-# policy change too large to fit is left out rather than losing the upload; the App sees
-# the protected-file change in the pull request itself.
-if (($(wc -c <"$envelope_file") > ENVELOPE_MAX_BYTES)); then
-	warning "the policy-change classification does not fit in the envelope (at most $ENVELOPE_MAX_BYTES bytes); it is sent without it and kept in the archfit-policy-change artifact"
-	envelope >"$envelope_file"
-fi
+envelope >"$envelope_file"
 set_output envelope-file "$envelope_file"
 
 if [[ -z $endpoint ]]; then
 	notice "no endpoint: nothing was sent; the envelope is $envelope_file"
-	if [[ $kind == report ]]; then
-		[[ $verdict != blocked ]] ||
-			die "the architecture verdict is blocked. Without an App endpoint this job is the gate; the archfit-report artifact lists the blocking findings."
-		# Optional attention is not a blocker, but absent required evidence is not a pass.
-		# The producer omits an empty required-rule list; explicit null is not an array.
-		jq -e -s --arg verdict "$verdict" '
-			length == 1 and (.[0] |
-			  .verdict == $verdict and (.verdict == "healthy" or .verdict == "needs_attention") and
-			  (.decision | type == "object" and
-			    (.hard_gates == "pass" or .hard_gates == "fail" or .hard_gates == "unmeasured") and
-			    all(.active_blockers, .attention_dimensions, .unknown_dimensions;
-			      type == "number" and . >= 0 and floor == .) and
-			    (if has("unevaluated_required_rules") then
-			       .unevaluated_required_rules | type == "array"
-			     else true end)))' "$payload" >/dev/null 2>&1 ||
-			die "the report has missing or invalid decision evidence. Without an App endpoint this job is the gate; inspect the archfit-report artifact."
-		jq -e '.decision | .hard_gates == "pass" and .active_blockers == 0 and
-			((.unevaluated_required_rules // []) | length) == 0' "$payload" >/dev/null ||
-			die "required architecture evidence is unavailable, hard gates did not pass, or active blockers remain. Without an App endpoint this job is the gate; inspect decision.hard_gates, decision.active_blockers and decision.unevaluated_required_rules in the archfit-report artifact."
-	fi
+	# Without an App this job is the gate: only a pass passes.
+	case $result_status in
+	pass) ;;
+	fail) die "the architecture check failed. Without an App endpoint this job is the gate; the archfit-result artifact lists the errors." ;;
+	*) die "the architecture check has no verdict (status $result_status). Without an App endpoint this job is the gate; the archfit-result artifact says what is unknown and what to do." ;;
+	esac
 	exit 0
 fi
 
 if [[ $fork == true ]]; then
-	notice "fork pull request: nothing was sent. GitHub gives fork runs no OIDC token, so the App cannot authenticate the report; it marks fork pull requests fork_unsupported. The report is in the archfit-report artifact. Push the branch to this repository for a gated report."
+	notice "fork pull request: nothing was sent. GitHub gives fork runs no OIDC token, so the App cannot authenticate the result; it marks fork pull requests fork. The result is in the archfit-result artifact. Push the branch to this repository for a gated check."
 	exit 0
 fi
 
 [[ -n ${ACTIONS_ID_TOKEN_REQUEST_URL:-} && -n ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-} ]] ||
 	die "no OIDC token is available: the job needs 'permissions: id-token: write'"
 
-case $kind in
-report) route=/v1/reports content_type=application/json cap=$REPORT_MAX_BYTES ;;
-discovery) route=/v1/discoveries content_type=application/yaml cap=$DISCOVERY_MAX_BYTES ;;
-baseline) route=/v1/baselines content_type=application/json cap=$BASELINE_MAX_BYTES ;;
-reanchor) route=/v1/reanchors content_type=application/json cap=$BASELINE_MAX_BYTES ;;
-*) die "unknown upload kind '$kind'" ;;
-esac
+readonly route=/v1/reports
 size=$(wc -c <"$payload" | tr -d ' ')
-((size <= cap)) || die "the $kind payload is $size bytes; the App accepts at most $cap"
+((size <= REPORT_MAX_BYTES)) || die "the result is $size bytes; the App accepts at most $REPORT_MAX_BYTES"
 envelope_size=$(wc -c <"$envelope_file" | tr -d ' ')
 ((envelope_size <= ENVELOPE_MAX_BYTES)) ||
 	die "the envelope is $envelope_size bytes; the App accepts at most $ENVELOPE_MAX_BYTES"
@@ -159,7 +110,7 @@ post() {
 			--connect-timeout 10 --max-time 90 \
 			--header @- \
 			--header "X-Archfit-Envelope: $envelope_line" \
-			--header "Content-Type: $content_type" \
+			--header "Content-Type: application/json" \
 			--data-binary @"$payload" \
 			"$url" || true
 }
@@ -222,34 +173,16 @@ code=$(app_value .error "$APP_TOKEN")
 
 hint() {
 	case $code in
-	envelope_missing | envelope_invalid | kind_mismatch) echo "Use the action commit the App pins in the generated workflow." ;;
+	envelope_missing | envelope_invalid) echo "Use the action commit the App pins in the generated workflow." ;;
 	token_missing) echo "The job needs 'permissions: id-token: write'." ;;
 	token_invalid) echo "The OIDC audience ($audience) must equal the App base URL exactly." ;;
 	repository_mismatch) echo "The OIDC token and the envelope name different repositories." ;;
 	not_installed) echo "Install the archfit GitHub App on this repository." ;;
-	run_not_found | run_mismatch | digest_mismatch) echo "Run the workflow again." ;;
-	merge_group_unverified) echo "The App could not confirm this merge group from GitHub; queue the pull request again." ;;
-	payload_too_large | discovery_too_large | baseline_too_large) echo "The payload exceeds the App's size limit." ;;
-	settings_missing) echo "Merge the onboarding pull request that adds .archfit-app.yaml first." ;;
-	workflow_not_approved) echo "Run $kind from the workflow that .archfit-app.yaml names." ;;
-	not_default_branch | unsupported_event | envelope_mismatch | fork)
-		if [[ $kind == report ]]; then
-			echo "Reports come from pull_request, push and default-branch merge_group runs of this repository."
-		else
-			echo "Run $kind by workflow_dispatch on the default branch of this repository."
-		fi
-		;;
-	discovery_invalid) echo "The App refused the engine's draft policy." ;;
-	baseline_invalid) echo "The App refused the captured file as an archfit.baseline.v3 baseline." ;;
-	reanchor_baseline_missing) echo "The default branch has no .archfit-baseline.json to re-anchor; capture the first baseline with mode: baseline." ;;
-	reanchor_digest_mismatch) echo "The baseline this run re-anchored is not the one on the default-branch head; dispatch the re-anchor again." ;;
-	reanchor_not_subset) echo "The re-anchored file accepts debt the protected baseline did not accept; dispatch the re-anchor again with this action's pinned commit." ;;
-	unknown_engine_identity) echo "Pin the engine-version and image-digest the App's manifest lists for this runner, as the generated workflow does." ;;
-	policy_missing) echo "The default branch has no .archfit.yaml; merge a policy before capturing a baseline." ;;
-	policy_mismatch | labels_mismatch)
-		echo "The capture did not read the .archfit.yaml and .archfit-labels.yaml at the default-branch head; dispatch the baseline capture again."
-		;;
-	rate_limited | unavailable | oidc_unavailable | internal) echo "The App is unavailable; run the workflow again later." ;;
+	installation_not_approved) echo "The App does not admit this installation yet." ;;
+	workflow_path) echo "Run archfit from .github/workflows/archfit.yaml as that workflow's own job, not as a reusable workflow." ;;
+	run_not_found | run_mismatch) echo "Run the workflow again." ;;
+	payload_too_large) echo "The result exceeds the App's size limit." ;;
+	rate_limited | unavailable | oidc_unavailable | admission_unavailable | internal) echo "The App is unavailable; run the workflow again later." ;;
 	method_not_allowed) echo "A proxy changed the request method; endpoint must be the App base URL, reached directly." ;;
 	*)
 		case $status in
@@ -260,55 +193,27 @@ hint() {
 	esac
 }
 
-# proposal prints the pull request the App opened or updated, shape-checked.
-proposal() {
-	printf 'pull request #%s %s' "$(app_value .pull_request '^[1-9][0-9]{0,9}$')" \
-		"$(app_value .url '^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$')"
-}
-
 case $status in
 2??)
-	case $kind in
-	report)
-		result="conclusion $(app_value .conclusion "$APP_TOKEN"), reason $(app_value .reason "$APP_TOKEN")"
-		next="The App's checks carry the verdict; this job's status covers only the upload."
-		;;
-	discovery)
-		result="policy $(proposal)"
-		next="Review and merge it to adopt the policy."
-		;;
-	baseline | reanchor)
-		# Only the JSON literal true; anything else is read as a proposal and shape-checked.
-		if [[ -n $answer_json ]] && jq -e '.unchanged == true' <<<"$answer_json" >/dev/null; then
-			result="unchanged: the capture equals the baseline on the default branch"
-			next="Nothing was written."
-		else
-			result="baseline $(proposal)"
-			next="The baseline changes only when an architecture owner approves that pull request's exact head commit and it is merged."
-		fi
-		;;
-	esac
-	printf 'archfit: the App accepted the %s: %s\n' "$kind" "$(escape "$result")"
-	summary "- App: accepted the $kind ($status): $result. $next"
+	# "accepted", not "passed": the App's check carries the status it gives the result.
+	result="status $(app_value .status '^(pass|fail|waiting|unknown)$')"
+	reason=$(answer_field .reason)
+	[[ -z $reason ]] || result+=", reason $(app_value .reason "$APP_TOKEN")"
+	printf 'archfit: the App accepted the result: %s\n' "$(escape "$result")"
+	summary "- App: accepted the result ($status): $result. The App's check carries the status; this job's status covers only the upload."
 	;;
 409)
-	# A superseded report or draft is replaced by the newer run's own upload. A superseded
-	# baseline or re-anchor is not: nothing proposes it until someone dispatches it again.
-	if [[ $kind == baseline || $kind == reanchor ]]; then
-		again="the baseline capture"
-		[[ $kind == baseline ]] || again="the re-anchor"
-		summary "- App: refused the $kind (409${code:+ $code}): no pull request was opened. Dispatch $again again."
-		die "the App answered 409 ${code:-conflict}: the default branch moved on or a newer run attempt exists, so no baseline pull request was opened. Dispatch $again again on the current default-branch head."
-	fi
-	notice "the App answered 409 ${code:-conflict}: a newer commit, run attempt or merge group supersedes this upload, and nothing was published for it"
+	# A newer run of the same head, a head that moved, or a merge group the queue no longer
+	# lists: the newer run uploads its own result, and nothing is published for this one.
+	notice "the App answered 409 ${code:-conflict}: a newer run, head or merge group supersedes this upload, and nothing was published for it"
 	;;
 000)
-	summary "- App: no answer for the $kind upload after $attempt attempt(s)."
+	summary "- App: no answer for the upload after $attempt attempt(s)."
 	[[ $token_failed == false ]] || die "could not obtain an OIDC token for audience $audience after $attempt attempts"
 	die "no answer from $url after $attempt attempts"
 	;;
 *)
-	summary "- App: refused the $kind upload: HTTP $status${code:+ $code} after $attempt attempt(s)."
-	die "the App did not accept the $kind upload: HTTP $status${code:+ $code} after $attempt attempt(s). $(hint)"
+	summary "- App: refused the upload: HTTP $status${code:+ $code} after $attempt attempt(s)."
+	die "the App did not accept the upload: HTTP $status${code:+ $code} after $attempt attempt(s). $(hint)"
 	;;
 esac

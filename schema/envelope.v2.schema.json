@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://archfit.dev/schemas/upload-envelope.v2.json",
+  "title": "archfit upload envelope v2",
+  "description": "What Action 4 states about one uploaded result. The upload body is the engine's result JSON v1, and payload_digest names its bytes. Every field is self-reported. The decoder is stricter than this document in ways a schema cannot express: integers carry no fraction or exponent and fit 32 bits (run_id 64 bits), keys appear once, and payload_digest must equal the SHA-256 of the body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "event",
+    "pull_request",
+    "head_sha",
+    "merge_base_sha",
+    "target_ref",
+    "target_sha",
+    "policy_digest",
+    "run_id",
+    "run_attempt",
+    "engine_version",
+    "image_digest",
+    "platform",
+    "payload_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "archfit.upload-envelope.v2"
+    },
+    "repository": {
+      "type": "string",
+      "description": "owner/name",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "event": {
+      "enum": ["pull_request", "push", "merge_group"],
+      "description": "The workflow trigger. Action 4 refuses every other event before it uploads."
+    },
+    "pull_request": {
+      "type": "integer",
+      "description": "Pull request number; 0 unless event is pull_request.",
+      "minimum": 0
+    },
+    "head_sha": {
+      "type": "string",
+      "description": "The commit the engine checked: the pull request head, the pushed commit, or the merge group commit.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "merge_base_sha": {
+      "type": "string",
+      "description": "merge-base(head_sha, target_sha), for every event. On a push to the target branch it equals head_sha.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "target_ref": {
+      "type": "string",
+      "description": "The full ref of the target branch the policy was read from, refs/heads/<branch>. Format only: the App compares it with GitHub.",
+      "pattern": "^refs/heads/[!-~]{1,244}$"
+    },
+    "target_sha": {
+      "type": "string",
+      "description": "The target tip the policy was read from, fetched when the run started.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "policy_digest": {
+      "type": "string",
+      "description": "sha256:<hex> of the policy file bytes the engine judged with; equal to the result's policy.digest.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "run_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "engine_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._+-]{1,64}$"
+    },
+    "image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "platform": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$",
+      "maxLength": 32
+    },
+    "payload_digest": {
+      "type": "string",
+      "description": "sha256:<hex> of the exact result bytes of the upload body.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event": { "const": "pull_request" } },
+        "required": ["event"]
+      },
+      "then": {
+        "properties": { "pull_request": { "minimum": 1 } }
+      },
+      "else": {
+        "properties": { "pull_request": { "const": 0 } }
+      }
+    }
+  ]
+}

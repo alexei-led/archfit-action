@@ -1,54 +1,21 @@
 # Fixture provenance
 
-The current `state.json`, `reanchored-baseline.json`, and `reanchor-report.txt`
-were emitted unmodified by released Engine **v3.4.0**, source
-`2692cd6b8aab23e559d0aa76712a192d69b4229f`, using the synthetic Go repository
-in `tests/engine-smoke.sh` (`ARCHFIT_FIXTURES_OUT`).
+These files are the unchanged results emitted by the published archfit `v4.0.0`
+image, source commit `37dd38244081ad1159c27515cec94560f3e44e30`. They were captured
+from the `linux/amd64` per-platform image
+`ghcr.io/alexei-led/archfit@sha256:3edf066717390ef79f8ae42974c62ccbd93a5bb6b9bc571cbf1dcf9c9ae0fc26`.
 
-- Native Linux arm64 Docker daemon (Colima on Apple Silicon).
-- Platform image: `ghcr.io/alexei-led/archfit@sha256:0cadc39c41de4dc58bb115b22bdd0296cb81688175a6ea1839a1e16ed2c35e1f` (linux/arm64; index `sha256:e4c258d0698c223cca223568a9fec1cd5393937cc6e6ce58def1f62b66205dd4`).
-- The image reports `archfit version v3.4.0 (commit 2692cd6, built 2026-10-28T18:42:58Z)`.
-- The Action ran through prepare, checkout, run and report with synthetic GitHub
-  events and no upload endpoint. Its envelope is test evidence, not GitHub
-  authentication or independently verified report content.
-- Native smoke passed all 33 assertions: report, actual stored-baseline capture,
-  comparable check, reanchor, legacy state-field removal and pull-request origin.
-- Captures omit the unmeasured encapsulation reference but retain measured cycle zero.
-- `reanchor-report.txt` is byte-identical to the v3.2.3 capture. `state.json` and
-  `reanchored-baseline.json` differ from it only where v3.4.0 adds to the contract:
-  the top-level `identity` block, a `supplied-coverage` measurement-profile producer,
-  and the `dotnet-msbuild`, `roslyn` and `supplied-coverage` coverage tools. Nothing
-  was relabeled or tailored.
+The `Pinned engine image (linux/amd64)` job in [Action CI run 43696615582](https://github.com/alexei-led/archfit-action/actions/runs/43696615582)
+ran `bash tests/engine-smoke.sh` with `ARCHFIT_FIXTURES_OUT` set, then uploaded
+`engine-fixtures-amd64`. That script builds the scratch repositories and captures
+these five scenarios. The image version is `v4.0.0`; each result names `4.0.0`.
+The same run passed the smoke test on `linux/arm64` using its own image digest.
+The engine release was published by [release run 43695907192](https://github.com/alexei-led/archfit/actions/runs/43695907192).
 
 | File | SHA-256 |
 | --- | --- |
-| `state.json` | `958a3de5c00bd41d8221a58381c6f30653ba1ae114f285ec34401954509c5d34` |
-| `reanchored-baseline.json` | `ea073aa8eb5b6f9c8e16a4571d6e2ca10e40b74dc711c60a6083f8f4f763737f` |
-| `reanchor-report.txt` | `9150a14a515ac840b0b6cd851a89dee49e65e4d80bcb8395c6e484f7d0fd6f38` |
-
-The same smoke recipe exports a fresh `captured-baseline.json` and `envelope.json`
-when `ARCHFIT_FIXTURES_OUT` is set. The fresh stored baseline's SHA-256 is
-`08e1b5572046781772d87b584325edcc24188b08afbeecf08adff1b15768981d`.
-These are qualification artifacts, not manufactured transport fixtures.
-
-To reproduce on an existing native arm64 `colima` context, use a new owned output
-directory under its existing HOME share. The script's supported `TMPDIR` must
-also be visible to the daemon:
-
-```sh
-capture="$HOME/archfit-action-v2.2.1-capture"
-test ! -e "$capture"
-mkdir -p "$capture/tmp"
-DOCKER_CONTEXT=colima RUNNER_ARCH=ARM64 TMPDIR="$capture/tmp" \
-  ARCHFIT_FIXTURES_OUT="$capture/outputs" bash tests/engine-smoke.sh
-```
-
-CI runs the real image on native amd64 and arm64 runners and preserves the
-exported artifacts. App admission and approved consumer tuples remain separate
-gates.
-
-`stored-baseline.json` is the pre-existing v3.0.0 legacy baseline input. It is
-not relabeled or regenerated; it retains the old fields the reanchor must drop.
-Its SHA-256 remains
-`3cd0698b92e6a39ec2d1ea55733a19c58f2a51f294458f75991204c248b169dd`.
-`required-evidence/` retains its separately documented original producer inputs.
+| `result/eol-differs.json` | `8d622af3dcad988b46782dd0eed9b90cc82734562d7b87310ccef07f81299e29` |
+| `result/fail.json` | `098b3e62f1a4dfc11917156ca601405b427a32f244144d73b573392ea61536dc` |
+| `result/pass.json` | `6f5903f068ac42384920738d454dbba5cc00576554ca5adae40df86b5aa85223` |
+| `result/policy-differs.json` | `a49716d231e7b36c0e6981496a1a10f6f44dfe1cf20ddc2c2c9df818fd3ab5bc` |
+| `result/push-at-tip.json` | `b45d4d22e77f4e5b71c86a746c2f0fa85403b4d97e3397752094b860f4c4c1ea` |
