@@ -17,8 +17,8 @@
     "differs": false,
     "target": "refs/remotes/origin/main"
   },
-  "base": "02948e7e116104618347ad2ad0dc164a2040f49c",
-  "head": "e0e9681b4111f53416972c23da5d5e0c57dcb30a",
-  "date": "2026-11-13",
-  "engine": "3.4.0-53-g5aee74a8"
+  "base": "7ec38a0595e1cd4c4d1975c50ad67ccf60bd6c08",
+  "head": "821b2f49c5976f80cd84560cbf75801933e1614f",
+  "date": "2026-11-15",
+  "engine": "4.0.0"
 }

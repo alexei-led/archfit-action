@@ -1,11 +1,21 @@
 # Fixture provenance
 
-Emitted unchanged by a native build of archfit commit `5aee74a8771abf86aa0557b84f48776c44cb3336`, using the scenarios in `tests/engine-smoke.sh`. The result `engine` field is the development version `3.4.0-53-g5aee74a8`. These are not image outputs; the release image digest pin and image fixtures are task 30.
+These files are the unchanged results emitted by the published archfit `v4.0.0`
+image, source commit `37dd38244081ad1159c27515cec94560f3e44e30`. They were captured
+from the `linux/amd64` per-platform image
+`ghcr.io/alexei-led/archfit@sha256:3edf066717390ef79f8ae42974c62ccbd93a5bb6b9bc571cbf1dcf9c9ae0fc26`.
+
+The `Pinned engine image (linux/amd64)` job in [Action CI run 43696615582](https://github.com/alexei-led/archfit-action/actions/runs/43696615582)
+ran `bash tests/engine-smoke.sh` with `ARCHFIT_FIXTURES_OUT` set, then uploaded
+`engine-fixtures-amd64`. That script builds the scratch repositories and captures
+these five scenarios. The image version is `v4.0.0`; each result names `4.0.0`.
+The same run passed the smoke test on `linux/arm64` using its own image digest.
+The engine release was published by [release run 43695907192](https://github.com/alexei-led/archfit/actions/runs/43695907192).
 
 | File | SHA-256 |
 | --- | --- |
-| `result/eol-differs.json` | `b1e10fcbf2c213ca77a01530bd105c8068754a674e3f650f4b42b60f36696360` |
-| `result/fail.json` | `33093c5c7742bc294fa771534b9d9f2d17130fdbd14f8358a81d152f672ce7c2` |
-| `result/pass.json` | `ff0d5d5c2c5ea00e156d1cb1c4303a0b914e1e636efa3b68088211ba2ff2453b` |
-| `result/policy-differs.json` | `e850667959f3f1d0662aeb269fef0f4ef56db4349578c93b8492cb5a1fef082c` |
-| `result/push-at-tip.json` | `b0023156a49d0143d6f90ffa7d0e8c0572859a0e668642c6a448a36e04b2f991` |
+| `result/eol-differs.json` | `8d622af3dcad988b46782dd0eed9b90cc82734562d7b87310ccef07f81299e29` |
+| `result/fail.json` | `098b3e62f1a4dfc11917156ca601405b427a32f244144d73b573392ea61536dc` |
+| `result/pass.json` | `6f5903f068ac42384920738d454dbba5cc00576554ca5adae40df86b5aa85223` |
+| `result/policy-differs.json` | `a49716d231e7b36c0e6981496a1a10f6f44dfe1cf20ddc2c2c9df818fd3ab5bc` |
+| `result/push-at-tip.json` | `b45d4d22e77f4e5b71c86a746c2f0fa85403b4d97e3397752094b860f4c4c1ea` |
