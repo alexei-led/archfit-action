@@ -29,7 +29,7 @@ endpoint=${ARCHFIT_ENDPOINT:-}
 [[ $engine_version == "$SUPPORTED_ENGINE_VERSION" ]] ||
 	die "engine-version '$engine_version' is not supported: this action runs engine $SUPPORTED_ENGINE_VERSION only; pin $SUPPORTED_ENGINE_VERSION and its digest"
 [[ $image_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
-	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused"
+	die "image-digest must be sha256:<64 lowercase hex>, the per-platform manifest digest of $ENGINE_IMAGE_REPO; tags are refused and an unpublished release pin must be filled"
 # The endpoint doubles as the OIDC audience, which the App compares byte for byte with
 # its base URL; a trailing slash would make the audience and the upload URL disagree.
 # Plain http only reaches a loopback App, as in tests: the upload carries a bearer token.

@@ -7,7 +7,7 @@
 #   FAKE_DOCKER_LOG      JSON lines, one per call (required)
 #   FAKE_RESULT          result that `check` prints, emitted by the engine (required for check);
 #                        "none" prints nothing, as the engine does on a usage or tool error
-#   FAKE_ENGINE_VERSION  version that `--version` reports (default v4.0.0-rc.1)
+#   FAKE_ENGINE_VERSION  version that `--version` reports (default v4.0.0)
 #   FAKE_PLATFORM        os/arch that `image inspect` reports (default linux/amd64)
 #   FAKE_CACHE_PROBE     simulate cache reads/writes when set to 1
 #   FAKE_CHECK_RC        exit code of `check`; default is the one its status implies
@@ -78,7 +78,7 @@ record --arg image "$image" --arg policy "$policy_digest" \
 
 case ${1:-} in
 --version)
-	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v4.0.0-rc.1}"
+	printf 'archfit version %s (commit , built )\n' "${FAKE_ENGINE_VERSION:-v4.0.0}"
 	;;
 check)
 	if [[ ${FAKE_CACHE_PROBE:-0} == 1 ]]; then

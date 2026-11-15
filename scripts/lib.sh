@@ -5,13 +5,13 @@
 # The engine image. The image-digest input selects the build inside it.
 readonly ENGINE_IMAGE_REPO=ghcr.io/alexei-led/archfit
 # The only engine release this action runs (the App's manifest names its image digests).
-readonly SUPPORTED_ENGINE_VERSION=v4.0.0-rc.1
+readonly SUPPORTED_ENGINE_VERSION=v4.0.0
 # Its per-platform manifest digests, used when the workflow names no image-digest. The
 # multi-arch index digest is never used: the App's manifest lists one digest per platform.
-# Placeholder: the v4.0.0-rc.1 image is not published yet. Its digests replace these zeros
-# before the pull request that introduces them leaves draft.
-readonly ENGINE_DIGEST_AMD64=sha256:0000000000000000000000000000000000000000000000000000000000000000
-readonly ENGINE_DIGEST_ARM64=sha256:0000000000000000000000000000000000000000000000000000000000000000
+# Release slots: replace with the published v4.0.0 platform manifest digests.
+# These values are intentionally invalid, so a missing pin fails before checkout.
+readonly ENGINE_DIGEST_AMD64=PENDING_AMD64
+readonly ENGINE_DIGEST_ARM64=PENDING_ARM64
 # The engine result contract this action carries (`archfit check --format json`).
 readonly RESULT_SCHEMA=archfit.result.v1
 

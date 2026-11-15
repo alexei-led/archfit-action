@@ -24,6 +24,11 @@ ARM64)
 	exit 1
 	;;
 esac
+# Conformance tests use a synthetic identity only with the fake Docker boundary.
+# Real-image smoke tests must use the release pin and fail when it is absent.
+if [[ ${FAKE_ENGINE:-false} == true && ! $ENGINE_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
+	ENGINE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
+fi
 readonly ENGINE_VERSION ENGINE_PLATFORM ENGINE_DIGEST
 passes=0 failures=0
 

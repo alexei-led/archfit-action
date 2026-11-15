@@ -23,7 +23,7 @@ inputs:
     default: ""
   engine-version:
     description: >-
-      Engine release of the image, for example v4.0.0-rc.1. Empty means the engine this
+      Engine release of the image, for example v4.0.0. Empty means the engine this
       action release pins. The action refuses an image that reports another version.
     required: false
     default: ""

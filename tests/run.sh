@@ -12,6 +12,7 @@
 # Needs bash, git, jq, curl, python3 and go.
 # shellcheck disable=SC2016 # single-quoted $names are jq's
 set -euo pipefail
+FAKE_ENGINE=true
 # shellcheck source=tests/helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
 
@@ -815,7 +816,7 @@ expect "the error names the permission" log_has "id-token: write"
 
 # --- Engine identity: the one engine this release pins --------------------------------
 
-for unsupported in v3.4.0 v4.0.0 v4.0.0-rc.2; do
+for unsupported in v3.4.0 v4.0.0-rc.1 v4.0.0-rc.2; do
 	begin "engine $unsupported is refused before the checkout"
 	on_push "$c2"
 	export ARCHFIT_ENGINE_VERSION=$unsupported
@@ -828,7 +829,7 @@ done
 
 begin "an image tag is refused before any work"
 on_push "$c2"
-export ARCHFIT_IMAGE_DIGEST=v4.0.0-rc.1
+export ARCHFIT_IMAGE_DIGEST=v4.0.0
 run_action "$origin"
 expect_eq "the action fails" 1 "$action_rc"
 expect "the error refuses tags" log_has "tags are refused"
@@ -845,12 +846,19 @@ for arch in X64 ARM64; do
 	export RUNNER_ARCH=$arch FAKE_PLATFORM=$platform
 	start_app "[$ok_answer]"
 	run_action "$origin"
-	expect_eq "the action succeeds" 0 "$action_rc"
-	expect_eq "prepare resolves the pinned engine" "$ENGINE_VERSION $pinned" "$(out engine-version) $(out image-digest)"
-	expect_eq "the envelope names them" "$ENGINE_VERSION $pinned $platform" \
-		"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
-	expect "the image is pulled by that digest" json_ok \
-		'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$pinned"
+	if [[ $pinned =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		expect_eq "the action succeeds" 0 "$action_rc"
+		expect_eq "prepare resolves the pinned engine" "$ENGINE_VERSION $pinned" "$(out engine-version) $(out image-digest)"
+		expect_eq "the envelope names them" "$ENGINE_VERSION $pinned $platform" \
+			"$(envelope_field engine_version) $(envelope_field image_digest) $(envelope_field platform)"
+		expect "the image is pulled by that digest" json_ok \
+			'.image == $i' "$(engine_call check)" --arg i "ghcr.io/alexei-led/archfit@$pinned"
+	else
+		expect_eq "an unpublished release pin fails" 1 "$action_rc"
+		expect "the error names the missing pin" log_has "an unpublished release pin must be filled"
+		expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+		expect_eq "no container ran" 0 "$(engine_calls)"
+	fi
 done
 
 begin "image-digest omitted on a runner without an engine image: refused before the checkout"
