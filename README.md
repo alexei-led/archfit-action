@@ -66,11 +66,13 @@ protection. Check the App's setup guidance for its availability.
   `workflow_run` and `pull_request_target`, are refused before checkout.
 - It checks the pull request head, pushed commit, or merge group commit. It
   fetches the target branch at the start of each run, including re-runs.
-- If the change leaves `.archfit.yaml` unchanged, the engine reads the target
-  tip's policy blob. If the change edits the policy, the engine compares it with
-  the target policy; a difference is `unknown`. If it deletes the policy, the
-  Action produces an `unknown` result. If neither target nor change has a policy,
-  nothing is checked or sent.
+- If the change leaves `.archfit.yaml` unchanged and its commit is not the
+  target tip, the engine reads the target tip's policy blob. If the change edits
+  the policy, the engine compares it with the target policy; a difference is
+  `unknown`. A check at the target tip uses the checkout's policy and can also be
+  `unknown` if checkout rules change its bytes. If the change deletes the policy,
+  the Action produces an `unknown` result. If neither target nor change has a
+  policy, nothing is checked or sent.
 - It saves `archfit-result`, the JSON result artifact, before upload. The App
   receives the same bytes with its envelope 2 and decides the `archfit/gate`
   check. A successful upload is not necessarily a passing check. The engine
