@@ -1,9 +1,17 @@
 # Fixture provenance
 
-These files are the unchanged results emitted by the published archfit `v4.0.0`
-image, source commit `37dd38244081ad1159c27515cec94560f3e44e30`. They were captured
-from the `linux/amd64` per-platform image
+These files are the unchanged results emitted by the first published archfit
+`v4.0.0` image, source commit `37dd38244081ad1159c27515cec94560f3e44e30`. They were
+captured from that `linux/amd64` per-platform image
 `ghcr.io/alexei-led/archfit@sha256:3edf066717390ef79f8ae42974c62ccbd93a5bb6b9bc571cbf1dcf9c9ae0fc26`.
+
+`v4.0.0` was published again from source commit `9715378a421af060962f737ed6aaf6096c26f57b`
+([release run 43741387062](https://github.com/alexei-led/archfit/actions/runs/43741387062))
+when the Go module moved to `/v4`; the engine code and this result contract did not
+change, so these five files were not re-captured. The pinned-image smoke job runs the
+current image through the same scenarios, and the Action's pinned digests name it:
+`linux/amd64` is `sha256:be1eac8f73513c6d0ef4ff17a78255629e4e4bc2d1b3e044b49afcbfdd6aac29`.
+The rebuild details are in [image-identity.json](https://github.com/alexei-led/archfit/releases/download/v4.0.0/image-identity.json).
 
 The `Pinned engine image (linux/amd64)` job in [Action CI run 43696615582](https://github.com/alexei-led/archfit-action/actions/runs/43696615582)
 ran `bash tests/engine-smoke.sh` with `ARCHFIT_FIXTURES_OUT` set, then uploaded
