@@ -1,5 +1,28 @@
 # Changelog
 
+## v4.0.0 (unreleased)
+
+### Changed
+
+- Check the change once with the target branch's policy and upload the result
+  with the App-owned envelope 2. The `archfit-result` artifact contains the
+  result; the App sets `archfit/gate` to pass, fail, waiting, or unknown.
+- Pull requests check the head. A re-run fetches the current target tip. A
+  changed or deleted policy is unknown until handled through the owner workflow.
+- Fork pull requests are checked but cannot upload an authenticated result.
+
+### Upgrade
+
+1. Upgrade the App and convert the policy to schema 3 before using Action 4.
+   Action 4 does not accept the old engine or envelope contract.
+2. Use the Action 4 workflow in `.github/workflows/archfit.yaml`. Remove the
+   `mode` input, `workflow_dispatch`, and uses of `payload-file` or `report-file`.
+   Discovery, baseline and re-anchor modes are no longer available.
+3. Require `archfit/gate` from the App in the default-branch ruleset, with zero
+   required GitHub approvals and no App bypass. Pin the Action to a commit the
+   App lists; its release supplies the engine's per-platform digest.
+
+
 ## v3.1.1
 
 ### Added

@@ -21,7 +21,6 @@ if [[ -z $image_digest ]]; then
 	esac
 fi
 endpoint=${ARCHFIT_ENDPOINT:-}
-mode=${ARCHFIT_MODE:-report}
 
 [[ $engine_version =~ ^[A-Za-z0-9._+-]{1,64}$ ]] ||
 	die "engine-version '$engine_version' is not a version such as $SUPPORTED_ENGINE_VERSION"
@@ -41,9 +40,6 @@ if [[ -n $endpoint ]]; then
 		die "endpoint must be the App base URL over https, for example https://archfit.example (http only for 127.0.0.1 or localhost)"
 	[[ $endpoint != */ ]] || die "endpoint must not end with '/'; give the App base URL exactly, for example https://archfit.example"
 fi
-
-[[ $mode == report ]] ||
-	die "mode '$mode' is not supported: Action 4 only checks pull_request, push and merge_group runs; remove the mode input"
 
 # Only the events the App accepts. The others are refused before the checkout:
 # workflow_run and pull_request_target run with the base repository's privileges on a

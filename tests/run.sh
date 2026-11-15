@@ -501,14 +501,10 @@ expect_eq "the action fails" 1 "$action_rc"
 expect "the error says a tag has no target branch" log_has "not a branch; archfit checks pushes to branches only"
 expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
 
-for removed in discovery baseline reanchor; do
-	begin "mode $removed is refused before the checkout"
-	on_push "$c2"
-	export ARCHFIT_MODE=$removed
-	run_action "$origin"
-	expect_eq "the action fails" 1 "$action_rc"
-	expect "the error says Action 4 only checks" log_has "mode '$removed' is not supported"
-	expect "nothing was checked out" test ! -e "$GITHUB_WORKSPACE"
+begin "removed public inputs and outputs are absent"
+for removed in mode payload-file report-file policy-change; do
+	expect "$removed is not a public input or output" \
+		bash -c '! grep -qE "^  $1:" "$2"' _ "$removed" "$root/action.yml"
 done
 
 # --- Merge groups: the group commit the event names, tied to the queue's base ----------

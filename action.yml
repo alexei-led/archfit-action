@@ -34,23 +34,11 @@ inputs:
       pins for the runner's platform. Tags are refused.
     required: false
     default: ""
-  mode:
-    description: >-
-      Empty or report. Action 4 has one mode, the check of pull_request, push
-      and merge_group runs; any other value is refused.
-    required: false
-    default: ""
 
 outputs:
   verdict:
     description: Status of the change (pass, fail or unknown); empty when nothing was checked.
     value: ${{ steps.run.outputs.verdict }}
-  payload-file:
-    description: The engine's result (archfit.result.v1), the bytes the upload carries; empty when nothing was checked.
-    value: ${{ steps.run.outputs.payload-file }}
-  report-file:
-    description: Always empty; Action 4 has no re-anchor report.
-    value: ${{ steps.run.outputs.report-file }}
   envelope-file:
     description: The archfit.upload-envelope.v2 line, exactly as sent in the X-Archfit-Envelope header; empty when none was written.
     value: ${{ steps.report.outputs.envelope-file }}
@@ -73,7 +61,6 @@ runs:
         ARCHFIT_ENGINE_VERSION: ${{ inputs.engine-version }}
         ARCHFIT_IMAGE_DIGEST: ${{ inputs.image-digest }}
         ARCHFIT_ENDPOINT: ${{ inputs.endpoint }}
-        ARCHFIT_MODE: ${{ inputs.mode }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
     # Full history and every branch, fetched now: the target tip, the merge base and the
