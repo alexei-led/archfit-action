@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **This repository moved to [coupling-dev/archfit-action](https://github.com/coupling-dev/archfit-action).**
+> Releases from v0.9.0 on are published there; this repository is archived and gets no updates.
+> Pin `coupling-dev/archfit-action@<commit> # v0.9.0` with policy `version: 1`; see its README.
+
 # archfit-action
 
 Run [archfit](https://github.com/alexei-led/archfit) on your GitHub Actions
